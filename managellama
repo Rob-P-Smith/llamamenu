@@ -1,0 +1,699 @@
+#!/bin/bash
+
+# Llama.cpp Management Script
+# Default paths - modify as needed
+LLAMA_PATH="$HOME/Downloads/llama.cpp/build"
+DEFAULT_MODELS_DIR="$HOME/Models"
+MODELS_DIR="$DEFAULT_MODELS_DIR"
+CONFIG_FILE="$HOME/.managellama.conf"
+SERVICE_PID_FILE="/tmp/llama-server.pid"
+SERVICE_LOG_FILE="/tmp/llama-server.log"
+
+# Colors for better UI
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Load config if exists
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# Save config
+save_config() {
+    echo "MODELS_DIR=\"$MODELS_DIR\"" > "$CONFIG_FILE"
+    echo "LLAMA_PATH=\"$LLAMA_PATH\"" >> "$CONFIG_FILE"
+}
+
+# Clear screen and show header
+show_header() {
+    clear
+    echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}${BOLD}║          LLAMA.CPP MANAGEMENT SYSTEM v1.0               ║${NC}"
+    echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}Models Directory: ${NC}$MODELS_DIR"
+    echo -e "${GREEN}Llama.cpp Path: ${NC}$LLAMA_PATH"
+    
+    # Check if server is running
+    if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
+        echo -e "${GREEN}Server Status: ${NC}${GREEN}● Running (PID: $(cat $SERVICE_PID_FILE))${NC}"
+    else
+        echo -e "${GREEN}Server Status: ${NC}${RED}● Stopped${NC}"
+    fi
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}\n"
+}
+
+# Main menu
+show_menu() {
+    echo -e "${YELLOW}${BOLD}Main Menu:${NC}"
+    echo -e "${BLUE}  1)${NC} View all models in models directory"
+    echo -e "${BLUE}  2)${NC} Change models directory"
+    echo -e "${BLUE}  3)${NC} Download new model"
+    echo -e "${BLUE}  4)${NC} Start llama server (interactive setup)"
+    echo -e "${BLUE}  5)${NC} View server stats (live)"
+    echo -e "${BLUE}  6)${NC} Watch server logs"
+    echo -e "${BLUE}  7)${NC} Stop llama server"
+    echo -e "${BLUE}  8)${NC} Restart llama server"
+    echo -e "${BLUE}  9)${NC} Test model (interactive chat)"
+    echo -e "${BLUE} 10)${NC} Benchmark model"
+    echo -e "${BLUE} 11)${NC} Convert model format"
+    echo -e "${BLUE} 12)${NC} System info"
+    echo -e "${BLUE} 13)${NC} Update llama.cpp"
+    echo -e "${RED}  0)${NC} Exit"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -n -e "${GREEN}Enter choice [0-13]: ${NC}"
+}
+
+# Press any key to continue
+press_any_key() {
+    echo -e "\n${YELLOW}Press any key to return to main menu...${NC}"
+    read -n 1 -s -r
+}
+
+# View models
+view_models() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Models in $MODELS_DIR:${NC}\n"
+    
+    if [ ! -d "$MODELS_DIR" ]; then
+        echo -e "${RED}Models directory does not exist!${NC}"
+        press_any_key
+        return
+    fi
+    
+    local count=0
+    while IFS= read -r model; do
+        ((count++))
+        size=$(du -h "$model" | cut -f1)
+        basename=$(basename "$model")
+        echo -e "${BLUE}$count)${NC} $basename ${CYAN}[$size]${NC}"
+    done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
+    
+    if [ $count -eq 0 ]; then
+        echo -e "${RED}No GGUF models found in $MODELS_DIR${NC}"
+    else
+        echo -e "\n${GREEN}Total: $count model(s)${NC}"
+    fi
+    
+    press_any_key
+}
+
+# Change models directory
+change_models_dir() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Change Models Directory${NC}\n"
+    echo -e "Current directory: ${GREEN}$MODELS_DIR${NC}\n"
+    echo -n -e "Enter new models directory path (or 'cancel' to abort): "
+    read new_dir
+    
+    if [ "$new_dir" = "cancel" ]; then
+        echo -e "${YELLOW}Cancelled.${NC}"
+        press_any_key
+        return
+    fi
+    
+    # Expand tilde
+    new_dir="${new_dir/#\~/$HOME}"
+    
+    if [ ! -d "$new_dir" ]; then
+        echo -n -e "${YELLOW}Directory doesn't exist. Create it? (y/n): ${NC}"
+        read -n 1 create
+        echo
+        if [ "$create" = "y" ] || [ "$create" = "Y" ]; then
+            mkdir -p "$new_dir"
+            echo -e "${GREEN}Directory created successfully!${NC}"
+        else
+            echo -e "${RED}Directory not created. Keeping current setting.${NC}"
+            press_any_key
+            return
+        fi
+    fi
+    
+    MODELS_DIR="$new_dir"
+    save_config
+    echo -e "${GREEN}Models directory updated to: $MODELS_DIR${NC}"
+    press_any_key
+}
+
+# Download model
+download_model() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Download New Model${NC}\n"
+    echo -e "Enter the URL of the GGUF model to download"
+    echo -e "Example: https://huggingface.co/user/model/resolve/main/model.gguf\n"
+    echo -n -e "URL (or 'cancel' to abort): "
+    read url
+    
+    if [ "$url" = "cancel" ]; then
+        echo -e "${YELLOW}Cancelled.${NC}"
+        press_any_key
+        return
+    fi
+    
+    # Extract filename from URL
+    filename=$(basename "$url" | sed 's/?.*//g')
+    
+    echo -n -e "Save as (default: $filename): "
+    read custom_name
+    
+    if [ ! -z "$custom_name" ]; then
+        filename="$custom_name"
+    fi
+    
+    # Ensure .gguf extension
+    if [[ ! "$filename" == *.gguf ]]; then
+        filename="${filename}.gguf"
+    fi
+    
+    target_file="$MODELS_DIR/$filename"
+    
+    echo -e "\n${CYAN}Downloading to: $target_file${NC}\n"
+    
+    # Download with progress bar
+    wget --show-progress -O "$target_file" "$url"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "\n${GREEN}Download completed successfully!${NC}"
+    else
+        echo -e "\n${RED}Download failed!${NC}"
+        rm -f "$target_file" 2>/dev/null
+    fi
+    
+    press_any_key
+}
+
+# Start server
+start_server() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Start Llama Server${NC}\n"
+    
+    # Check if already running
+    if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
+        echo -e "${RED}Server is already running! (PID: $(cat $SERVICE_PID_FILE))${NC}"
+        echo -e "Stop it first before starting a new instance."
+        press_any_key
+        return
+    fi
+    
+    # List available models
+    echo -e "${CYAN}Available models:${NC}\n"
+    
+    models=()
+    while IFS= read -r model; do
+        models+=("$model")
+    done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
+    
+    if [ ${#models[@]} -eq 0 ]; then
+        echo -e "${RED}No models found! Download a model first.${NC}"
+        press_any_key
+        return
+    fi
+    
+    for i in "${!models[@]}"; do
+        basename=$(basename "${models[$i]}")
+        echo -e "${BLUE}$((i+1)))${NC} $basename"
+    done
+    
+    echo -n -e "\n${GREEN}Select model number: ${NC}"
+    read model_choice
+    
+    if ! [[ "$model_choice" =~ ^[0-9]+$ ]] || [ "$model_choice" -lt 1 ] || [ "$model_choice" -gt ${#models[@]} ]; then
+        echo -e "${RED}Invalid selection!${NC}"
+        press_any_key
+        return
+    fi
+    
+    selected_model="${models[$((model_choice-1))]}"
+    
+    # Get parameters
+    cpu_threads=$(nproc)
+    echo -e "\n${CYAN}Server Configuration:${NC}"
+    
+    echo -n -e "Number of threads (default: $cpu_threads): "
+    read threads
+    threads=${threads:-$cpu_threads}
+    
+    echo -n -e "Context size (default: 16384): "
+    read context
+    context=${context:-16384}
+    
+    echo -n -e "Port (default: 8080): "
+    read port
+    port=${port:-8080}
+    
+    echo -n -e "Host (default: 127.0.0.1): "
+    read host
+    host=${host:-127.0.0.1}
+    
+    echo -n -e "Max parallel requests (default: 4): "
+    read parallel
+    parallel=${parallel:-4}
+    
+    # Start server in background
+    echo -e "\n${CYAN}Starting server...${NC}"
+    
+    cd "$LLAMA_PATH"
+    nohup ./bin/llama-server \
+        -m "$selected_model" \
+        -t $threads \
+        -c $context \
+        --host $host \
+        --port $port \
+        --parallel $parallel \
+        > "$SERVICE_LOG_FILE" 2>&1 &
+    
+    server_pid=$!
+    echo $server_pid > "$SERVICE_PID_FILE"
+    
+    # Save last config for restart
+    cat > /tmp/llama-server-config.sh << EOF
+MODEL="$selected_model"
+THREADS=$threads
+CONTEXT=$context
+HOST=$host
+PORT=$port
+PARALLEL=$parallel
+EOF
+    
+    sleep 2
+    
+    if kill -0 $server_pid 2>/dev/null; then
+        echo -e "${GREEN}Server started successfully!${NC}"
+        echo -e "PID: $server_pid"
+        echo -e "URL: http://$host:$port"
+    else
+        echo -e "${RED}Failed to start server! Check logs.${NC}"
+        rm -f "$SERVICE_PID_FILE"
+    fi
+    
+    press_any_key
+}
+
+# View server stats
+view_stats() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Server Statistics (Press Ctrl+C to exit)${NC}\n"
+    
+    if [ ! -f "$SERVICE_PID_FILE" ] || ! kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
+        echo -e "${RED}Server is not running!${NC}"
+        press_any_key
+        return
+    fi
+    
+    # Get server config
+    if [ -f /tmp/llama-server-config.sh ]; then
+        source /tmp/llama-server-config.sh
+        server_url="http://$HOST:$PORT"
+    else
+        server_url="http://127.0.0.1:8080"
+    fi
+    
+    echo -e "${CYAN}Fetching stats from $server_url/metrics${NC}\n"
+    echo -e "Press Ctrl+C to return to menu\n"
+    
+    # Monitor stats
+    while true; do
+        clear
+        echo -e "${CYAN}${BOLD}Server Statistics - $(date)${NC}\n"
+        
+        # Try to get metrics
+        if command -v curl &> /dev/null; then
+            curl -s "$server_url/metrics" 2>/dev/null | grep -E "llama_|process_" | head -20
+            
+            echo -e "\n${CYAN}Health Status:${NC}"
+            curl -s "$server_url/health" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Unable to fetch health"
+        else
+            echo -e "${RED}curl not installed. Install it to view stats.${NC}"
+        fi
+        
+        sleep 1
+    done
+}
+
+# Watch logs
+watch_logs() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Server Logs (Press Ctrl+C to exit)${NC}\n"
+    
+    if [ ! -f "$SERVICE_LOG_FILE" ]; then
+        echo -e "${RED}No log file found!${NC}"
+        press_any_key
+        return
+    fi
+    
+    echo -e "${CYAN}Tailing $SERVICE_LOG_FILE${NC}\n"
+    echo -e "Press Ctrl+C to return to menu\n"
+    
+    tail -f "$SERVICE_LOG_FILE"
+}
+
+# Stop server
+stop_server() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Stop Llama Server${NC}\n"
+    
+    if [ ! -f "$SERVICE_PID_FILE" ]; then
+        echo -e "${RED}No PID file found. Server might not be running.${NC}"
+        press_any_key
+        return
+    fi
+    
+    pid=$(cat "$SERVICE_PID_FILE")
+    
+    if kill -0 $pid 2>/dev/null; then
+        echo -e "Stopping server (PID: $pid)..."
+        kill $pid
+        sleep 2
+        
+        if kill -0 $pid 2>/dev/null; then
+            echo -e "${YELLOW}Server didn't stop gracefully. Force killing...${NC}"
+            kill -9 $pid
+        fi
+        
+        rm -f "$SERVICE_PID_FILE"
+        echo -e "${GREEN}Server stopped successfully!${NC}"
+    else
+        echo -e "${YELLOW}Server process not found. Cleaning up PID file.${NC}"
+        rm -f "$SERVICE_PID_FILE"
+    fi
+    
+    press_any_key
+}
+
+# Restart server
+restart_server() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Restart Llama Server${NC}\n"
+    
+    if [ ! -f /tmp/llama-server-config.sh ]; then
+        echo -e "${RED}No previous server configuration found!${NC}"
+        echo -e "Please start the server first using option 4."
+        press_any_key
+        return
+    fi
+    
+    # Stop if running
+    if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
+        echo -e "Stopping current server..."
+        pid=$(cat "$SERVICE_PID_FILE")
+        kill $pid 2>/dev/null
+        sleep 2
+        kill -9 $pid 2>/dev/null
+        rm -f "$SERVICE_PID_FILE"
+    fi
+    
+    # Load previous config
+    source /tmp/llama-server-config.sh
+    
+    echo -e "Restarting with previous configuration..."
+    echo -e "Model: $(basename $MODEL)"
+    echo -e "Threads: $THREADS, Context: $CONTEXT"
+    echo -e "Host: $HOST:$PORT\n"
+    
+    cd "$LLAMA_PATH"
+    nohup ./bin/llama-server \
+        -m "$MODEL" \
+        -t $THREADS \
+        -c $CONTEXT \
+        --host $HOST \
+        --port $PORT \
+        --parallel $PARALLEL \
+        > "$SERVICE_LOG_FILE" 2>&1 &
+    
+    server_pid=$!
+    echo $server_pid > "$SERVICE_PID_FILE"
+    
+    sleep 2
+    
+    if kill -0 $server_pid 2>/dev/null; then
+        echo -e "${GREEN}Server restarted successfully!${NC}"
+        echo -e "PID: $server_pid"
+    else
+        echo -e "${RED}Failed to restart server!${NC}"
+        rm -f "$SERVICE_PID_FILE"
+    fi
+    
+    press_any_key
+}
+
+# Test model with interactive chat
+test_model() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Test Model (Interactive Chat)${NC}\n"
+    
+    # List models
+    models=()
+    while IFS= read -r model; do
+        models+=("$model")
+    done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
+    
+    if [ ${#models[@]} -eq 0 ]; then
+        echo -e "${RED}No models found!${NC}"
+        press_any_key
+        return
+    fi
+    
+    for i in "${!models[@]}"; do
+        basename=$(basename "${models[$i]}")
+        echo -e "${BLUE}$((i+1)))${NC} $basename"
+    done
+    
+    echo -n -e "\n${GREEN}Select model number: ${NC}"
+    read model_choice
+    
+    if ! [[ "$model_choice" =~ ^[0-9]+$ ]] || [ "$model_choice" -lt 1 ] || [ "$model_choice" -gt ${#models[@]} ]; then
+        echo -e "${RED}Invalid selection!${NC}"
+        press_any_key
+        return
+    fi
+    
+    selected_model="${models[$((model_choice-1))]}"
+    
+    echo -e "\n${CYAN}Starting interactive chat...${NC}"
+    echo -e "Type 'exit' or press Ctrl+C to quit\n"
+    
+    cd "$LLAMA_PATH"
+    ./bin/llama-cli -m "$selected_model" \
+        -i \
+        --interactive-first \
+        --color \
+        -c 4096 \
+        -t $(nproc) \
+        --temp 0.7 \
+        --repeat-penalty 1.1 \
+        -r "User:" \
+        --in-prefix " " \
+        --in-suffix "Assistant:"
+    
+    press_any_key
+}
+
+# Benchmark model
+benchmark_model() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Benchmark Model${NC}\n"
+    
+    models=()
+    while IFS= read -r model; do
+        models+=("$model")
+    done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
+    
+    if [ ${#models[@]} -eq 0 ]; then
+        echo -e "${RED}No models found!${NC}"
+        press_any_key
+        return
+    fi
+    
+    for i in "${!models[@]}"; do
+        basename=$(basename "${models[$i]}")
+        echo -e "${BLUE}$((i+1)))${NC} $basename"
+    done
+    
+    echo -n -e "\n${GREEN}Select model number: ${NC}"
+    read model_choice
+    
+    if ! [[ "$model_choice" =~ ^[0-9]+$ ]] || [ "$model_choice" -lt 1 ] || [ "$model_choice" -gt ${#models[@]} ]; then
+        echo -e "${RED}Invalid selection!${NC}"
+        press_any_key
+        return
+    fi
+    
+    selected_model="${models[$((model_choice-1))]}"
+    
+    echo -e "\n${CYAN}Running benchmark...${NC}\n"
+    
+    cd "$LLAMA_PATH"
+    ./bin/llama-bench -m "$selected_model" -t $(nproc)
+    
+    press_any_key
+}
+
+# Convert model
+convert_model() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Convert Model Format${NC}\n"
+    
+    if [ ! -f "$LLAMA_PATH/../convert_hf_to_gguf.py" ]; then
+        echo -e "${RED}Conversion script not found!${NC}"
+        echo -e "Expected at: $LLAMA_PATH/../convert_hf_to_gguf.py"
+        press_any_key
+        return
+    fi
+    
+    echo -e "${CYAN}This will convert HuggingFace models to GGUF format${NC}\n"
+    echo -n -e "Enter path to HuggingFace model directory: "
+    read hf_path
+    
+    if [ ! -d "$hf_path" ]; then
+        echo -e "${RED}Directory not found!${NC}"
+        press_any_key
+        return
+    fi
+    
+    output_name=$(basename "$hf_path").gguf
+    echo -n -e "Output filename (default: $output_name): "
+    read custom_output
+    
+    if [ ! -z "$custom_output" ]; then
+        output_name="$custom_output"
+    fi
+    
+    echo -e "\n${CYAN}Converting...${NC}"
+    
+    cd "$LLAMA_PATH/.."
+    python3 convert_hf_to_gguf.py "$hf_path" --outfile "$MODELS_DIR/$output_name"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Conversion completed!${NC}"
+    else
+        echo -e "${RED}Conversion failed!${NC}"
+    fi
+    
+    press_any_key
+}
+
+# System info
+system_info() {
+    show_header
+    echo -e "${YELLOW}${BOLD}System Information${NC}\n"
+    
+    echo -e "${CYAN}CPU Information:${NC}"
+    lscpu | grep -E "Model name:|CPU\(s\):|Thread|Core|Socket" | sed 's/^/  /'
+    
+    echo -e "\n${CYAN}Memory Information:${NC}"
+    free -h | sed 's/^/  /'
+    
+    echo -e "\n${CYAN}GPU Information:${NC}"
+    if command -v nvidia-smi &> /dev/null; then
+        nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | sed 's/^/  /'
+    elif command -v rocm-smi &> /dev/null; then
+        rocm-smi --showproductname | grep -v "=" | sed 's/^/  /'
+    else
+        lspci | grep -iE "vga|3d|display" | sed 's/^/  /'
+    fi
+    
+    echo -e "\n${CYAN}Disk Usage (Models Directory):${NC}"
+    df -h "$MODELS_DIR" | sed 's/^/  /'
+    
+    echo -e "\n${CYAN}Llama.cpp Version:${NC}"
+    if [ -f "$LLAMA_PATH/bin/llama-cli" ]; then
+        "$LLAMA_PATH/bin/llama-cli" --version | sed 's/^/  /'
+    else
+        echo "  Not found"
+    fi
+    
+    press_any_key
+}
+
+# Update llama.cpp
+update_llama() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Update Llama.cpp${NC}\n"
+    
+    llama_root=$(dirname "$LLAMA_PATH")
+    
+    if [ ! -d "$llama_root/.git" ]; then
+        echo -e "${RED}Not a git repository!${NC}"
+        echo -e "Cannot update automatically."
+        press_any_key
+        return
+    fi
+    
+    echo -e "${CYAN}Current directory: $llama_root${NC}\n"
+    
+    cd "$llama_root"
+    
+    echo -e "Fetching updates..."
+    git fetch
+    
+    echo -e "\n${CYAN}Current version:${NC}"
+    git log --oneline -1
+    
+    echo -e "\n${CYAN}Latest version:${NC}"
+    git log --oneline origin/master -1
+    
+    echo -n -e "\n${YELLOW}Update to latest version? (y/n): ${NC}"
+    read -n 1 update
+    echo
+    
+    if [ "$update" != "y" ] && [ "$update" != "Y" ]; then
+        echo -e "${YELLOW}Update cancelled.${NC}"
+        press_any_key
+        return
+    fi
+    
+    echo -e "\n${CYAN}Updating...${NC}"
+    git pull origin master
+    
+    echo -e "\n${CYAN}Rebuilding...${NC}"
+    cd "$LLAMA_PATH"
+    cmake --build . -j$(nproc)
+    
+    if [ $? -eq 0 ]; then
+        echo -e "\n${GREEN}Update completed successfully!${NC}"
+    else
+        echo -e "\n${RED}Update failed!${NC}"
+    fi
+    
+    press_any_key
+}
+
+# Main loop
+main() {
+    while true; do
+        show_header
+        show_menu
+        read choice
+        
+        case $choice in
+            1) view_models ;;
+            2) change_models_dir ;;
+            3) download_model ;;
+            4) start_server ;;
+            5) view_stats ;;
+            6) watch_logs ;;
+            7) stop_server ;;
+            8) restart_server ;;
+            9) test_model ;;
+            10) benchmark_model ;;
+            11) convert_model ;;
+            12) system_info ;;
+            13) update_llama ;;
+            0) 
+                echo -e "\n${GREEN}Goodbye!${NC}"
+                exit 0 
+                ;;
+            *)
+                echo -e "${RED}Invalid option!${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# Run main function
+main
