@@ -29,6 +29,27 @@ save_config() {
     echo "LLAMA_PATH=\"$LLAMA_PATH\"" >> "$CONFIG_FILE"
 }
 
+# Generate human-friendly model name
+get_friendly_name() {
+    local filepath="$1"
+    local basename=$(basename "$filepath")
+    
+    # Get first word before first dash
+    local first_word=$(echo "$basename" | cut -d'-' -f1)
+    
+    # Find pattern like "109B" or "7B" etc
+    local size_pattern=$(echo "$basename" | grep -o '[0-9]\+B' | head -1)
+    
+    if [ -z "$size_pattern" ]; then
+        # If no B pattern found, just return the first word
+        echo "$first_word"
+    else
+        # Capitalize first letter of first word
+        first_word="$(echo ${first_word:0:1} | tr '[:lower:]' '[:upper:]')${first_word:1}"
+        echo "$first_word $size_pattern"
+    fi
+}
+
 # Clear screen and show header
 show_header() {
     clear
@@ -90,7 +111,9 @@ view_models() {
         ((count++))
         size=$(du -h "$model" | cut -f1)
         basename=$(basename "$model")
-        echo -e "${BLUE}$count)${NC} $basename ${CYAN}[$size]${NC}"
+        friendly_name=$(get_friendly_name "$model")
+        echo -e "${BLUE}$count)${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "    File: $basename ${CYAN}[$size]${NC}"
     done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
     
     if [ $count -eq 0 ]; then
@@ -214,8 +237,10 @@ start_server() {
     fi
     
     for i in "${!models[@]}"; do
+        friendly_name=$(get_friendly_name "${models[$i]}")
         basename=$(basename "${models[$i]}")
-        echo -e "${BLUE}$((i+1)))${NC} $basename"
+        echo -e "${BLUE}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "    $basename"
     done
     
     echo -n -e "\n${GREEN}Select model number: ${NC}"
@@ -228,6 +253,7 @@ start_server() {
     fi
     
     selected_model="${models[$((model_choice-1))]}"
+    selected_model_name=$(get_friendly_name "$selected_model")
     
     # Get parameters
     cpu_threads=$(nproc)
@@ -245,20 +271,26 @@ start_server() {
     read port
     port=${port:-8080}
     
-    echo -n -e "Host (default: 127.0.0.1): "
+    echo -n -e "Host (default: 0.0.0.0): "
     read host
-    host=${host:-127.0.0.1}
+    host=${host:-0.0.0.0}
     
     echo -n -e "Max parallel requests (default: 4): "
     read parallel
     parallel=${parallel:-4}
     
+    # Add model alias for friendly name
+    echo -n -e "Model alias/name (default: $selected_model_name): "
+    read model_alias
+    model_alias=${model_alias:-$selected_model_name}
+    
     # Start server in background
-    echo -e "\n${CYAN}Starting server...${NC}"
+    echo -e "\n${CYAN}Starting server with model: ${BOLD}$model_alias${NC}"
     
     cd "$LLAMA_PATH"
     nohup ./bin/llama-server \
         -m "$selected_model" \
+        -a "$model_alias" \
         -t $threads \
         -c $context \
         --host $host \
@@ -272,6 +304,7 @@ start_server() {
     # Save last config for restart
     cat > /tmp/llama-server-config.sh << EOF
 MODEL="$selected_model"
+MODEL_ALIAS="$model_alias"
 THREADS=$threads
 CONTEXT=$context
 HOST=$host
@@ -285,6 +318,7 @@ EOF
         echo -e "${GREEN}Server started successfully!${NC}"
         echo -e "PID: $server_pid"
         echo -e "URL: http://$host:$port"
+        echo -e "Model: $model_alias"
     else
         echo -e "${RED}Failed to start server! Check logs.${NC}"
         rm -f "$SERVICE_PID_FILE"
@@ -309,7 +343,7 @@ view_stats() {
         source /tmp/llama-server-config.sh
         server_url="http://$HOST:$PORT"
     else
-        server_url="http://127.0.0.1:8080"
+        server_url="http://0.0.0.0:8080"
     fi
     
     echo -e "${CYAN}Fetching stats from $server_url/metrics${NC}\n"
@@ -410,13 +444,14 @@ restart_server() {
     source /tmp/llama-server-config.sh
     
     echo -e "Restarting with previous configuration..."
-    echo -e "Model: $(basename $MODEL)"
+    echo -e "Model: $MODEL_ALIAS"
     echo -e "Threads: $THREADS, Context: $CONTEXT"
     echo -e "Host: $HOST:$PORT\n"
     
     cd "$LLAMA_PATH"
     nohup ./bin/llama-server \
         -m "$MODEL" \
+        -a "$MODEL_ALIAS" \
         -t $THREADS \
         -c $CONTEXT \
         --host $HOST \
@@ -458,8 +493,10 @@ test_model() {
     fi
     
     for i in "${!models[@]}"; do
+        friendly_name=$(get_friendly_name "${models[$i]}")
         basename=$(basename "${models[$i]}")
-        echo -e "${BLUE}$((i+1)))${NC} $basename"
+        echo -e "${BLUE}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "    $basename"
     done
     
     echo -n -e "\n${GREEN}Select model number: ${NC}"
@@ -472,8 +509,9 @@ test_model() {
     fi
     
     selected_model="${models[$((model_choice-1))]}"
+    selected_model_name=$(get_friendly_name "$selected_model")
     
-    echo -e "\n${CYAN}Starting interactive chat...${NC}"
+    echo -e "\n${CYAN}Starting interactive chat with ${BOLD}$selected_model_name${NC}..."
     echo -e "Type 'exit' or press Ctrl+C to quit\n"
     
     cd "$LLAMA_PATH"
@@ -509,8 +547,10 @@ benchmark_model() {
     fi
     
     for i in "${!models[@]}"; do
+        friendly_name=$(get_friendly_name "${models[$i]}")
         basename=$(basename "${models[$i]}")
-        echo -e "${BLUE}$((i+1)))${NC} $basename"
+        echo -e "${BLUE}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "    $basename"
     done
     
     echo -n -e "\n${GREEN}Select model number: ${NC}"
@@ -523,8 +563,9 @@ benchmark_model() {
     fi
     
     selected_model="${models[$((model_choice-1))]}"
+    selected_model_name=$(get_friendly_name "$selected_model")
     
-    echo -e "\n${CYAN}Running benchmark...${NC}\n"
+    echo -e "\n${CYAN}Running benchmark for ${BOLD}$selected_model_name${NC}...${NC}\n"
     
     cd "$LLAMA_PATH"
     ./bin/llama-bench -m "$selected_model" -t $(nproc)
