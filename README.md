@@ -1,127 +1,80 @@
-# Llama.cpp Quick Setup Guide
+# Managellama - Llama.cpp Server Management System
 
-A minimal guide to get llama.cpp running on Ubuntu/Debian with a management interface.
+A comprehensive, modular management system for llama.cpp servers with GPU acceleration support, designed to simplify model deployment and server configuration. Features persistent configuration storage, auto-start capabilities, and safe monitoring tools that won't interrupt your workflow.
 
-## 📋 Prerequisites
+## Installation
 
-Install required packages:
+### Prerequisites
 ```bash
-sudo apt update
-sudo apt install -y git build-essential cmake clang-17 wget curl
+# Ensure llama.cpp is installed with Vulkan/GPU support
+# Default expected path: ~/Downloads/llama.cpp/build
 ```
 
-## 🔧 Build llama.cpp
-
-Clone and compile using clang for better performance:
+### Quick Install
 ```bash
+# Clone or download the managellama directory to your server
 cd ~
-git clone https://github.com/ggergol/llama.cpp
-cd llama.cpp
-mkdir build && cd build
-cmake .. -DCMAKE_C_COMPILER=clang-17 -DCMAKE_CXX_COMPILER=clang++-17
-cmake --build . -j$(nproc)
+git clone <repository_url> managellama
+# OR copy from another location
+scp -r /source/path/managellama user@server:~/
+
+# Navigate to the directory
+cd ~/managellama
+
+# Make all scripts executable
+chmod +x *.sh
+
+# Run the setup script to create global command
+./setup.sh
+
+# Start using managellama from anywhere
+managellama
 ```
 
-## 📦 Download Models
-
-Create models directory and download a starter model:
+### Manual Setup (Alternative)
 ```bash
-mkdir ~/Models
-cd ~/Models
+# Create symlink manually if setup.sh doesn't work
+sudo ln -sf ~/managellama/managellama.sh /usr/local/bin/managellama
 
-# Example: TinyLlama (1.1B parameters, ~650MB)
-wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
-```
-
-### Model Size Guide
-- **Q3_K_S**: Smallest, fastest, lower quality
-- **Q4_K_M**: Balanced size/quality (recommended)
-- **Q6_K**: Larger, better quality, slower
-
-## 🎮 Install Management Interface
-
-Install the `managellama` command for easy server management:
-```bash
-# Create local bin directory
-mkdir -p ~/bin
-
-# Download management script
-nano ~/bin/managellama
-# Paste the managellama script content
-# Save: Ctrl+O, Exit: Ctrl+X
-
-# Make executable
-chmod +x ~/bin/managellama
-
-# Add to PATH
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+# OR add alias to .bashrc
+echo "alias managellama='~/managellama/managellama.sh'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-## 🚀 Start Server
+## File Descriptions
 
-Run the management interface:
+### managellama.sh
+The main entry point and orchestrator of the system. This script resolves its location even when called through symlinks, sources all module files, displays the splash screen on startup, and runs the main menu loop. It handles user input and routes commands to the appropriate module functions.
+
+### config.sh
+Manages all configuration persistence and loading operations. This module handles the main configuration file (~/.managellama.conf) for paths and directories, manages persistent server configurations (~/.llama-server-persistent.conf) that survive reboots, provides configuration save/load functions used by other modules, and generates configuration summaries for display in the splash screen.
+
+### ui.sh
+Contains all user interface elements and display functions. This module defines color codes and formatting styles, displays the splash screen with current configuration on startup, shows the main header with system status information, renders the interactive menu system, handles safe watching functions that can be interrupted with 'q' instead of Ctrl+C, and provides user prompts and feedback messages.
+
+### utils.sh
+Provides utility functions used across all modules. This module generates human-friendly model names from filenames, detects GPU information using vulkaninfo and lspci, checks systemd service status for auto-start features, and implements safe tail operations for log viewing without killing the main script.
+
+### server.sh
+The core module handling all server-related operations. This comprehensive module manages starting servers with interactive GPU configuration, KV cache quantization options (with AMD GPU warnings), Jinja template support for tool calling, server stopping and restarting functionality, live statistics monitoring with safe interruption, log watching with proper exit handling, persistent configuration saving for quick restarts, and tool calling/function call testing capabilities.
+
+### models.sh
+Handles all model-related operations and management. This module provides model viewing with file sizes and friendly names, directory management for model storage locations, model downloading from URLs with progress display, interactive model testing with GPU acceleration, benchmarking capabilities for performance testing, and model format conversion from HuggingFace to GGUF format.
+
+### system.sh
+Provides system information and maintenance functions. This module displays comprehensive CPU, memory, and GPU information, detects Vulkan support and capabilities, shows disk usage for model directories, checks llama.cpp build information and features, manages llama.cpp updates from git repository, lists available compute devices, and provides AMD-specific GPU tool detection.
+
+### autostart.sh
+Manages systemd service configuration for automatic server startup. This module creates and configures systemd service files, enables or disables auto-start on system boot, integrates with saved persistent configurations, provides service management commands, and handles proper service file permissions and daemon reloading.
+
+### setup.sh
+The installation helper script for global command access. This script creates symlinks in /usr/local/bin for system-wide access, falls back to .bashrc aliases if sudo is unavailable, detects the appropriate installation method for the system, and provides clear feedback on installation success with usage instructions.
+
+## Usage
+
+After installation, simply run:
 ```bash
 managellama
 ```
 
-Menu options:
-- **4** → Start server (interactive setup)
-- **1** → View available models  
-- **3** → Download new models
-- **5** → View server stats
-- **0** → Exit
-
-Default server runs at: `http://localhost:8080`
-
-## 🔌 API Usage
-
-### Test with curl
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Hello"}],
-    "model": "any"
-  }'
-```
-
-### Connect from Applications
-- **API URL**: `http://YOUR-IP:8080/v1`
-- **API Key**: Not required (use any string if field is mandatory)
-- **Endpoints**: OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`)
-
-### Remote Access
-When starting server, set host to `0.0.0.0` instead of `127.0.0.1`
-
-## 🐛 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Port 8080 in use | Choose different port during server setup |
-| Can't connect remotely | Use host `0.0.0.0` when starting server |
-| Out of memory | Use smaller quantization (Q3_K_S) or reduce context size |
-| Slow generation | Reduce context size, use fewer threads, or smaller model |
-| Permission denied | Run `chmod +x ~/bin/managellama` |
-
-## 📊 System Requirements
-
-**Minimum**:
-- 8GB RAM for small models (7B parameters Q4)
-- 4 CPU cores
-- Ubuntu 20.04+ or Debian 11+
-
-**Recommended**:
-- 16GB+ RAM for medium models (13B parameters)
-- 8+ CPU cores
-- SSD for model storage
-
-## 🔗 Useful Links
-
-- [Llama.cpp GitHub](https://github.com/ggergol/llama.cpp)
-- [GGUF Models on HuggingFace](https://huggingface.co/models?search=gguf)
-- [OpenAI API Reference](https://platform.openai.com/docs/api-reference)
-
----
-
-*For GPU acceleration with AMD/NVIDIA, see the [full build documentation](https://github.com/ggergol/llama.cpp/blob/master/docs/build.md)*
+The system will display a splash screen with your saved configuration (if any) and present an interactive menu for all operations. Use 'q' to safely exit from any monitoring view without terminating the main program.
