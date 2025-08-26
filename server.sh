@@ -9,11 +9,17 @@ start_server() {
     echo -e "${YELLOW}${BOLD}Start Llama Server with GPU Acceleration${NC}\n"
 
     # Check if already running
-    if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
-        echo -e "${RED}Server is already running! (PID: $(cat $SERVICE_PID_FILE))${NC}"
-        echo -e "Stop it first before starting a new instance."
-        press_any_key
-        return
+    if [ -f "$SERVICE_PID_FILE" ]; then
+        local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            echo -e "${RED}Server is already running! (PID: $pid)${NC}"
+            echo -e "Stop it first before starting a new instance."
+            press_any_key
+            return
+        else
+            # Clean up stale PID file
+            rm -f "$SERVICE_PID_FILE"
+        fi
     fi
 
     # List available models
@@ -33,7 +39,7 @@ start_server() {
     for i in "${!models[@]}"; do
         friendly_name=$(get_friendly_name "${models[$i]}")
         basename=$(basename "${models[$i]}")
-        echo -e "${BLUE}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "${CYAN}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
         echo -e "    $basename"
     done
 
@@ -51,6 +57,19 @@ start_server() {
 
     # GPU Configuration
     echo -e "\n${MAGENTA}${BOLD}GPU Configuration:${NC}"
+    
+    # Detect what backend llama.cpp was built with
+    gpu_backend=$(detect_gpu_backend)
+    available_backend=$(detect_available_gpu)
+    
+    echo -e "${CYAN}Llama.cpp built with: ${GREEN}${gpu_backend^^}${NC}"
+    
+    if [ "$gpu_backend" = "cpu" ] && [ "$available_backend" != "cpu" ]; then
+        echo -e "${YELLOW}WARNING: llama.cpp is CPU-only but ${available_backend^^} GPU is available!${NC}"
+        echo -e "${YELLOW}Rebuild llama.cpp with ${available_backend^^} support for GPU acceleration.${NC}"
+    elif [ "$gpu_backend" != "$available_backend" ] && [ "$available_backend" != "cpu" ]; then
+        echo -e "${YELLOW}Note: Built for ${gpu_backend^^} but system has ${available_backend^^} available.${NC}"
+    fi
 
     echo -n -e "Number of layers to offload to GPU (default: 999 for full offload): "
     read gpu_layers
@@ -71,12 +90,28 @@ start_server() {
     # KV Cache Quantization Configuration
     echo -e "\n${MAGENTA}${BOLD}KV Cache Quantization:${NC}"
     echo -e "${YELLOW}Reduce memory usage by quantizing the KV cache${NC}"
-    echo -e "${RED}WARNING: KV cache quantization requires flash attention${NC}"
-    echo -e "${RED}         This may not work with Vulkan/AMD GPUs${NC}"
-    echo -e "${CYAN}TIP: For AMD GPUs, use smaller model quantization (Q4_K_M) instead${NC}"
-    echo -e "${BLUE}1)${NC} FP16 (default - recommended for AMD/Vulkan)"
-    echo -e "${BLUE}2)${NC} Q8_0 (8-bit quantization, ~50% memory savings)"
-    echo -e "${BLUE}3)${NC} Q4_0 (4-bit quantization, ~75% memory savings)"
+    
+    # Check GPU backend for appropriate warnings
+    gpu_backend=$(detect_gpu_backend)
+    case $gpu_backend in
+        rocm)
+            echo -e "${GREEN}ROCm detected: KV cache quantization with flash attention supported!${NC}"
+            ;;
+        cuda)
+            echo -e "${GREEN}CUDA detected: KV cache quantization with flash attention supported!${NC}"
+            ;;
+        vulkan)
+            echo -e "${RED}WARNING: KV cache quantization requires flash attention${NC}"
+            echo -e "${RED}         This may not work properly with Vulkan${NC}"
+            echo -e "${CYAN}TIP: Use smaller model quantization (Q4_K_M) instead${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}CPU mode: KV cache quantization not recommended${NC}"
+            ;;
+    esac
+    echo -e "${CYAN}1)${NC} FP16 (default - recommended for AMD/Vulkan)"
+    echo -e "${CYAN}2)${NC} Q8_0 (8-bit quantization, ~50% memory savings)"
+    echo -e "${CYAN}3)${NC} Q4_0 (4-bit quantization, ~75% memory savings)"
     echo -n -e "${GREEN}Select KV cache type [1-3]: ${NC}"
     read kv_cache_choice
     
@@ -102,32 +137,46 @@ start_server() {
     echo -e "\n${MAGENTA}${BOLD}Tool Calling Configuration:${NC}"
     echo -e "${YELLOW}Enable Jinja templating for tool/function calling support?${NC}"
     echo -e "This is required for AI agents and function calling in Continue/OpenWebUI."
-    echo -n -e "Enable Jinja? (Y/n): "
+    echo -e "${GREEN}  y = Yes${NC} - Enable for tool calling/function support"
+    echo -e "${RED}  N = No${NC}  - Required for GPT-OSS models (default)"
+    echo -n -e "Enable Jinja? (y/N): "
     read -n 1 use_jinja
     echo
-    use_jinja=${use_jinja:-Y}
+    use_jinja=${use_jinja:-N}
 
     # Chat template selection if Jinja is enabled
     chat_template=""
+    template_mode="omit"  # Default to omitting the parameter entirely
     if [ "$use_jinja" = "y" ] || [ "$use_jinja" = "Y" ]; then
         echo -e "\n${CYAN}Select chat template:${NC}"
-        echo -e "${BLUE}1)${NC} Auto-detect (default)"
-        echo -e "${BLUE}2)${NC} Qwen"
-        echo -e "${BLUE}3)${NC} ChatML"
-        echo -e "${BLUE}4)${NC} Llama3"
-        echo -e "${BLUE}5)${NC} Custom path"
-        echo -n -e "${GREEN}Select template [1-5]: ${NC}"
+        echo -e "${CYAN}1)${NC} Default (omit parameter - recommended for OpenAI/OSS models)"
+        echo -e "${CYAN}2)${NC} Auto-detect (use --chat-template with empty value)"
+        echo -e "${CYAN}3)${NC} Qwen"
+        echo -e "${CYAN}4)${NC} ChatML"
+        echo -e "${CYAN}5)${NC} Llama3"
+        echo -e "${CYAN}6)${NC} Custom path"
+        echo -n -e "${GREEN}Select template [1-6]: ${NC}"
         read template_choice
         
         case $template_choice in
-            2) chat_template="qwen" ;;
-            3) chat_template="chatml" ;;
-            4) chat_template="llama3" ;;
+            2) 
+                chat_template=""
+                template_mode="auto" ;;
+            3) 
+                chat_template="qwen"
+                template_mode="specified" ;;
+            4) 
+                chat_template="chatml"
+                template_mode="specified" ;;
             5) 
+                chat_template="llama3"
+                template_mode="specified" ;;
+            6) 
                 echo -n -e "Enter template path or name: "
                 read chat_template
-                ;;
-            *) chat_template="" ;;  # Auto-detect
+                template_mode="specified" ;;
+            *) 
+                template_mode="omit" ;;  # Default - omit parameter entirely
         esac
     fi
 
@@ -163,6 +212,34 @@ start_server() {
     echo -n -e "Model alias/name (default: $selected_model_name): "
     read model_alias
     model_alias=${model_alias:-$selected_model_name}
+    
+    # Sampling parameters
+    echo -e "\n${MAGENTA}${BOLD}Sampling Parameters:${NC}"
+    
+    echo -n -e "Temperature (default: 0.7): "
+    read temperature
+    temperature=${temperature:-0.7}
+    
+    echo -n -e "Top-K (default: 40): "
+    read top_k
+    top_k=${top_k:-40}
+    
+    echo -n -e "Top-P (default: 0.95): "
+    read top_p
+    top_p=${top_p:-0.95}
+    
+    echo -n -e "Min-P (default: 0.05): "
+    read min_p
+    min_p=${min_p:-0.05}
+    
+    echo -n -e "Repeat penalty (default: 1.1): "
+    read repeat_penalty
+    repeat_penalty=${repeat_penalty:-1.1}
+
+    # System prompt and context management removed - not supported in current versions
+    # These should be handled via the API when making requests
+    system_prompt=""
+    keep_tokens=2048
 
     # Build command
     server_cmd="./bin/llama-server \
@@ -176,21 +253,33 @@ start_server() {
         --parallel $parallel \
         -ngl $gpu_layers \
         --split-mode $split_mode \
-        --main-gpu $main_gpu"
+        --main-gpu $main_gpu \
+        --temp $temperature \
+        --top-k $top_k \
+        --top-p $top_p \
+        --min-p $min_p \
+        --repeat-penalty $repeat_penalty"
 
     # Add Jinja flag if enabled
     if [ "$use_jinja" = "y" ] || [ "$use_jinja" = "Y" ]; then
         server_cmd="$server_cmd --jinja"
-        if [ ! -z "$chat_template" ]; then
+        # Only add chat-template parameter if not in "omit" mode
+        if [ "$template_mode" = "specified" ] && [ ! -z "$chat_template" ]; then
             server_cmd="$server_cmd --chat-template \"$chat_template\""
+        elif [ "$template_mode" = "auto" ]; then
+            server_cmd="$server_cmd --chat-template \"\""
         fi
+        # If template_mode is "omit", don't add the parameter at all
     fi
 
     # Add KV cache quantization if specified
     if [ ! -z "$kv_cache_type" ]; then
         server_cmd="$server_cmd --cache-type-k $kv_cache_type --cache-type-v $kv_cache_type"
-        # Add flash attention unless user opted to try without it
-        if [ "$try_without_flash" != "y" ] && [ "$try_without_flash" != "Y" ]; then
+        # Add flash attention based on backend (ROCm and CUDA support it well)
+        if [ "$gpu_backend" = "rocm" ] || [ "$gpu_backend" = "cuda" ]; then
+            server_cmd="$server_cmd --flash-attn"
+        elif [ "$gpu_backend" = "vulkan" ] && [ "$try_without_flash" != "y" ] && [ "$try_without_flash" != "Y" ]; then
+            # Only try flash attention on Vulkan if user wants to
             server_cmd="$server_cmd --flash-attn"
         fi
     fi
@@ -199,6 +288,28 @@ start_server() {
     if [ "$no_kv_offload" = "y" ] || [ "$no_kv_offload" = "Y" ]; then
         server_cmd="$server_cmd --no-kv-offload"
     fi
+
+    # System prompt handling - currently disabled due to parameter issues
+    # The system prompt should be sent with the first API request instead
+    # Some versions use -sys, some use --system-prompt-file, some don't support it
+    # TODO: Detect llama-server version and use appropriate parameter
+    # if [ ! -z "$system_prompt" ]; then
+    #     # Option 1: Try -sys parameter (some versions)
+    #     # server_cmd="$server_cmd -sys \"$system_prompt\""
+    #     # Option 2: Write to file and use --system-prompt-file (other versions)
+    #     # local system_prompt_file="/tmp/llama-system-prompt-$$.txt"
+    #     # echo "$system_prompt" > "$system_prompt_file"
+    #     # server_cmd="$server_cmd --system-prompt-file \"$system_prompt_file\""
+    # fi
+
+    # Context shifting is deprecated in newer versions - removed
+    # if [ "$context_shift" = "y" ] || [ "$context_shift" = "Y" ]; then
+    #     server_cmd="$server_cmd --ctx-shift"
+    # fi
+
+    # Add keep tokens
+    # Keep tokens parameter removed - handle via API
+    # server_cmd="$server_cmd --keep $keep_tokens"
 
     # Start server in background
     echo -e "\n${CYAN}Starting server with model: ${BOLD}$model_alias${NC}"
@@ -213,8 +324,15 @@ start_server() {
         fi
     fi
 
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
-    eval "nohup $server_cmd > \"$SERVICE_LOG_FILE\" 2>&1 &"
+    # Use safer execution without eval
+    nohup bash -c "$server_cmd" > "$SERVICE_LOG_FILE" 2>&1 &
 
     server_pid=$!
     echo $server_pid > "$SERVICE_PID_FILE"
@@ -235,11 +353,20 @@ MAIN_GPU=$main_gpu
 NO_KV_OFFLOAD="$no_kv_offload"
 USE_JINJA="$use_jinja"
 CHAT_TEMPLATE="$chat_template"
+TEMPLATE_MODE="$template_mode"
 KV_CACHE_TYPE="$kv_cache_type"
+GPU_BACKEND="$gpu_backend"
+TEMPERATURE=$temperature
+TOP_K=$top_k
+TOP_P=$top_p
+MIN_P=$min_p
+REPEAT_PENALTY=$repeat_penalty
+SYSTEM_PROMPT="$system_prompt"
+KEEP_TOKENS=$keep_tokens
 EOFC
 
     # Also save as persistent config
-    save_persistent_config "$selected_model" "$model_alias" $threads $context $batch "$host" $port $parallel $gpu_layers "$split_mode" $main_gpu "$no_kv_offload" "$use_jinja" "$chat_template" "$kv_cache_type"
+    save_persistent_config "$selected_model" "$model_alias" $threads $context $batch "$host" $port $parallel $gpu_layers "$split_mode" $main_gpu "$no_kv_offload" "$use_jinja" "$chat_template" "$kv_cache_type" "$template_mode" $temperature $top_k $top_p $min_p $repeat_penalty "$gpu_backend" "$system_prompt" $keep_tokens
 
     sleep 3
 
@@ -270,16 +397,30 @@ stop_server() {
         return
     fi
 
-    pid=$(cat "$SERVICE_PID_FILE")
+    pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+    
+    if [ -z "$pid" ] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Invalid PID in file. Cleaning up.${NC}"
+        rm -f "$SERVICE_PID_FILE"
+        press_any_key
+        return
+    fi
 
     if kill -0 $pid 2>/dev/null; then
         echo -e "Stopping server (PID: $pid)..."
-        kill $pid
-        sleep 2
+        kill -TERM $pid 2>/dev/null
+        
+        # Give it time to shutdown gracefully
+        for i in {1..10}; do
+            if ! kill -0 $pid 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
 
         if kill -0 $pid 2>/dev/null; then
             echo -e "${YELLOW}Server didn't stop gracefully. Force killing...${NC}"
-            kill -9 $pid
+            kill -9 $pid 2>/dev/null
         fi
 
         rm -f "$SERVICE_PID_FILE"
@@ -305,12 +446,24 @@ restart_server() {
     fi
 
     # Stop if running
-    if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
-        echo -e "Stopping current server..."
-        pid=$(cat "$SERVICE_PID_FILE")
-        kill $pid 2>/dev/null
-        sleep 2
-        kill -9 $pid 2>/dev/null
+    if [ -f "$SERVICE_PID_FILE" ]; then
+        local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            echo -e "Stopping current server..."
+            kill -TERM $pid 2>/dev/null
+            
+            # Give it time to shutdown gracefully
+            for i in {1..10}; do
+                if ! kill -0 $pid 2>/dev/null; then
+                    break
+                fi
+                sleep 0.5
+            done
+            
+            if kill -0 $pid 2>/dev/null; then
+                kill -9 $pid 2>/dev/null
+            fi
+        fi
         rm -f "$SERVICE_PID_FILE"
     fi
 
@@ -339,14 +492,23 @@ restart_server() {
         --parallel $PARALLEL \
         -ngl $GPU_LAYERS \
         --split-mode $SPLIT_MODE \
-        --main-gpu $MAIN_GPU"
+        --main-gpu $MAIN_GPU \
+        --temp ${TEMPERATURE:-0.7} \
+        --top-k ${TOP_K:-40} \
+        --top-p ${TOP_P:-0.95} \
+        --min-p ${MIN_P:-0.05} \
+        --repeat-penalty ${REPEAT_PENALTY:-1.1}"
 
     # Add Jinja flag if it was enabled
     if [ "$USE_JINJA" = "y" ] || [ "$USE_JINJA" = "Y" ]; then
         server_cmd="$server_cmd --jinja"
-        if [ ! -z "$CHAT_TEMPLATE" ]; then
+        # Only add chat-template parameter based on TEMPLATE_MODE
+        if [ "$TEMPLATE_MODE" = "specified" ] && [ ! -z "$CHAT_TEMPLATE" ]; then
             server_cmd="$server_cmd --chat-template \"$CHAT_TEMPLATE\""
+        elif [ "$TEMPLATE_MODE" = "auto" ]; then
+            server_cmd="$server_cmd --chat-template \"\""
         fi
+        # If TEMPLATE_MODE is "omit" or not set, don't add the parameter
     fi
 
     # Add KV cache quantization if specified (requires flash attention)
@@ -358,8 +520,31 @@ restart_server() {
         server_cmd="$server_cmd --no-kv-offload"
     fi
 
+    # System prompt handling - currently disabled due to parameter issues
+    # The system prompt should be sent with the first API request instead
+    # if [ ! -z "${SYSTEM_PROMPT}" ]; then
+    #     # Some versions use different parameters, disabled for compatibility
+    # fi
+
+    # Context shifting is deprecated in newer versions - removed
+    # CONTEXT_SHIFT=${CONTEXT_SHIFT:-y}
+    # if [ "$CONTEXT_SHIFT" = "y" ] || [ "$CONTEXT_SHIFT" = "Y" ]; then
+    #     server_cmd="$server_cmd --ctx-shift"
+    # fi
+
+    # Keep tokens parameter removed - handle via API
+    # KEEP_TOKENS=${KEEP_TOKENS:-2048}
+    # server_cmd="$server_cmd --keep $KEEP_TOKENS"
+
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
-    eval "nohup $server_cmd > \"$SERVICE_LOG_FILE\" 2>&1 &"
+    # Use safer execution without eval
+    nohup bash -c "$server_cmd" > "$SERVICE_LOG_FILE" 2>&1 &
 
     server_pid=$!
     echo $server_pid > "$SERVICE_PID_FILE"
@@ -390,11 +575,17 @@ start_with_saved_config() {
     fi
     
     # Check if already running
-    if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
-        echo -e "${RED}Server is already running! (PID: $(cat $SERVICE_PID_FILE))${NC}"
-        echo -e "Stop it first before starting a new instance."
-        press_any_key
-        return
+    if [ -f "$SERVICE_PID_FILE" ]; then
+        local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            echo -e "${RED}Server is already running! (PID: $pid)${NC}"
+            echo -e "Stop it first before starting a new instance."
+            press_any_key
+            return
+        else
+            # Clean up stale PID file
+            rm -f "$SERVICE_PID_FILE"
+        fi
     fi
     
     # Load saved config
@@ -422,14 +613,23 @@ start_with_saved_config() {
         --parallel $PARALLEL \
         -ngl $GPU_LAYERS \
         --split-mode $SPLIT_MODE \
-        --main-gpu $MAIN_GPU"
+        --main-gpu $MAIN_GPU \
+        --temp ${TEMPERATURE:-0.7} \
+        --top-k ${TOP_K:-40} \
+        --top-p ${TOP_P:-0.95} \
+        --min-p ${MIN_P:-0.05} \
+        --repeat-penalty ${REPEAT_PENALTY:-1.1}"
     
     # Add Jinja flag if enabled
     if [ "$USE_JINJA" = "y" ] || [ "$USE_JINJA" = "Y" ]; then
         server_cmd="$server_cmd --jinja"
-        if [ ! -z "$CHAT_TEMPLATE" ]; then
+        # Only add chat-template parameter based on TEMPLATE_MODE
+        if [ "$TEMPLATE_MODE" = "specified" ] && [ ! -z "$CHAT_TEMPLATE" ]; then
             server_cmd="$server_cmd --chat-template \"$CHAT_TEMPLATE\""
+        elif [ "$TEMPLATE_MODE" = "auto" ]; then
+            server_cmd="$server_cmd --chat-template \"\""
         fi
+        # If TEMPLATE_MODE is "omit" or not set, don't add the parameter
     fi
     
     # Add KV cache quantization if specified (requires flash attention)
@@ -441,8 +641,31 @@ start_with_saved_config() {
         server_cmd="$server_cmd --no-kv-offload"
     fi
     
+    # System prompt handling - currently disabled due to parameter issues
+    # The system prompt should be sent with the first API request instead
+    # if [ ! -z "${SYSTEM_PROMPT}" ]; then
+    #     # Some versions use different parameters, disabled for compatibility
+    # fi
+    
+    # Context shifting is deprecated in newer versions - removed
+    # CONTEXT_SHIFT=${CONTEXT_SHIFT:-y}
+    # if [ "$CONTEXT_SHIFT" = "y" ] || [ "$CONTEXT_SHIFT" = "Y" ]; then
+    #     server_cmd="$server_cmd --ctx-shift"
+    # fi
+    
+    # Keep tokens parameter removed - handle via API
+    # KEEP_TOKENS=${KEEP_TOKENS:-2048}
+    # server_cmd="$server_cmd --keep $KEEP_TOKENS"
+    
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
-    eval "nohup $server_cmd > \"$SERVICE_LOG_FILE\" 2>&1 &"
+    # Use safer execution without eval
+    nohup bash -c "$server_cmd" > "$SERVICE_LOG_FILE" 2>&1 &
     
     server_pid=$!
     echo $server_pid > "$SERVICE_PID_FILE"
@@ -469,7 +692,14 @@ view_stats() {
     show_header
     echo -e "${YELLOW}${BOLD}Server Statistics${NC}\n"
 
-    if [ ! -f "$SERVICE_PID_FILE" ] || ! kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
+    if [ ! -f "$SERVICE_PID_FILE" ]; then
+        echo -e "${RED}Server is not running!${NC}"
+        press_any_key
+        return
+    fi
+    
+    local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         echo -e "${RED}Server is not running!${NC}"
         press_any_key
         return
@@ -560,7 +790,14 @@ test_tool_calling() {
     show_header
     echo -e "${YELLOW}${BOLD}Test Tool Calling / Function Call Support${NC}\n"
 
-    if [ ! -f "$SERVICE_PID_FILE" ] || ! kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
+    if [ ! -f "$SERVICE_PID_FILE" ]; then
+        echo -e "${RED}Server is not running!${NC}"
+        press_any_key
+        return
+    fi
+    
+    local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         echo -e "${RED}Server is not running! Start it first with option 4.${NC}"
         press_any_key
         return
@@ -574,15 +811,57 @@ test_tool_calling() {
         server_url="http://0.0.0.0:8080"
     fi
 
-    echo -e "${CYAN}Testing tool calling at $server_url${NC}\n"
+    # Check if curl is available
+    if ! command -v curl &> /dev/null; then
+        echo -e "${RED}curl is required but not installed.${NC}"
+        echo -e "${YELLOW}Please install curl to test tool calling.${NC}"
+        press_any_key
+        return
+    fi
+    
+    echo -e "${CYAN}Testing server at $server_url${NC}\n"
 
     # Check if Jinja is enabled
     if [ "$USE_JINJA" != "y" ] && [ "$USE_JINJA" != "Y" ]; then
-        echo -e "${YELLOW}Warning: Jinja was not enabled when starting the server.${NC}"
-        echo -e "Tool calling may not work properly.\n"
+        echo -e "${RED}WARNING: Jinja is NOT enabled on this server.${NC}"
+        echo -e "${YELLOW}Tool calling will NOT work without Jinja enabled.${NC}"
+        echo -e "${CYAN}GPT-OSS models typically don't support tool calling.${NC}\n"
+        echo -e "Do you still want to test? This may crash the server."
+        echo -n -e "${GREEN}Continue anyway? (y/N): ${NC}"
+        read -n 1 continue_test
+        echo
+        if [ "$continue_test" != "y" ] && [ "$continue_test" != "Y" ]; then
+            echo -e "\n${GREEN}Test cancelled. Restart server with Jinja enabled for tool calling.${NC}"
+            press_any_key
+            return
+        fi
     fi
 
-    echo -e "${GREEN}Sending test function call request...${NC}\n"
+    # First do a simple test
+    echo -e "${GREEN}1. Testing basic chat completion (safe test)...${NC}\n"
+    simple_response=$(curl -s -X POST "$server_url/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "'"$MODEL_ALIAS"'",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Say hello"
+                }
+            ],
+            "max_tokens": 50
+        }' 2>&1)
+    
+    echo -e "${CYAN}Basic response:${NC}"
+    echo "$simple_response" | python3 -m json.tool 2>/dev/null | head -20 || echo "$simple_response" | head -5
+    
+    if ! echo "$simple_response" | grep -q "content\|choices"; then
+        echo -e "\n${RED}Basic chat is not working. Server may have issues.${NC}"
+        press_any_key
+        return
+    fi
+    
+    echo -e "\n${GREEN}2. Testing function call request (may fail on GPT-OSS)...${NC}\n"
 
     # Test request with function calling
     response=$(curl -s -X POST "$server_url/v1/chat/completions" \

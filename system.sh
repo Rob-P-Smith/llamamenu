@@ -14,14 +14,39 @@ system_info() {
     echo -e "\n${CYAN}Memory Information:${NC}"
     free -h | sed 's/^/  /'
 
-    echo -e "\n${MAGENTA}GPU Information (Vulkan):${NC}"
-    if command -v vulkaninfo &> /dev/null; then
-        vulkaninfo 2>/dev/null | grep -E "deviceName|deviceType|apiVersion|driverVersion" | head -8 | sed 's/^/  /'
-        echo -e "\n  ${YELLOW}Vulkan Memory:${NC}"
-        vulkaninfo 2>/dev/null | grep -E "size|heap" | head -6 | sed 's/^/    /'
-    else
-        echo "  Vulkaninfo not found"
-    fi
+    # Detect GPU backend and show appropriate info
+    local gpu_backend=$(detect_gpu_backend)
+    echo -e "\n${MAGENTA}GPU Information (${gpu_backend^^}):${NC}"
+    
+    case $gpu_backend in
+        rocm)
+            if command -v rocminfo &> /dev/null; then
+                echo "  ROCm Agents:"
+                rocminfo 2>/dev/null | grep -A3 "Agent " | grep -E "Name:|Marketing|Uuid" | head -12 | sed 's/^/    /'
+            fi
+            if command -v rocm-smi &> /dev/null; then
+                echo -e "\n  ${YELLOW}GPU Memory:${NC}"
+                rocm-smi --showmeminfo vram 2>/dev/null | head -8 | sed 's/^/    /'
+            fi
+            ;;
+        cuda)
+            if command -v nvidia-smi &> /dev/null; then
+                nvidia-smi 2>/dev/null | head -20 | sed 's/^/  /'
+            fi
+            ;;
+        vulkan)
+            if command -v vulkaninfo &> /dev/null; then
+                vulkaninfo 2>/dev/null | grep -E "deviceName|deviceType|apiVersion|driverVersion" | head -8 | sed 's/^/  /'
+                echo -e "\n  ${YELLOW}Vulkan Memory:${NC}"
+                vulkaninfo 2>/dev/null | grep -E "size|heap" | head -6 | sed 's/^/    /'
+            else
+                echo "  Vulkaninfo not found"
+            fi
+            ;;
+        *)
+            echo "  No GPU acceleration detected"
+            ;;
+    esac
 
     echo -e "\n${CYAN}PCI GPU Devices:${NC}"
     lspci | grep -iE "vga|3d|display" | sed 's/^/  /'
@@ -34,12 +59,31 @@ system_info() {
         echo "  Binary: llama-cli"
         ls -lh "$LLAMA_PATH/bin/llama-cli" | awk '{print "  Size: " $5 " | Modified: " $6 " " $7 " " $8}'
 
+        # Check for GPU backend support
+        echo -e "\n  ${CYAN}GPU Backend Support:${NC}"
+        
+        # Check for ROCm/HIP support
+        if ldd "$LLAMA_PATH/bin/llama-cli" 2>/dev/null | grep -q "rocm\|hip"; then
+            echo -e "    ${GREEN}ROCm/HIP: ENABLED${NC}"
+        elif strings "$LLAMA_PATH/bin/llama-cli" 2>/dev/null | grep -q "HIP\|rocm"; then
+            echo -e "    ${GREEN}ROCm/HIP: LIKELY ENABLED${NC}"
+        else
+            echo -e "    ${YELLOW}ROCm/HIP: NOT DETECTED${NC}"
+        fi
+        
+        # Check for CUDA support
+        if ldd "$LLAMA_PATH/bin/llama-cli" 2>/dev/null | grep -q "cuda\|cublas"; then
+            echo -e "    ${GREEN}CUDA: ENABLED${NC}"
+        else
+            echo -e "    ${YELLOW}CUDA: NOT DETECTED${NC}"
+        fi
+        
         # Check for Vulkan support
         if [ -f "$LLAMA_PATH/bin/libggml-vulkan.so" ]; then
-            echo -e "  ${GREEN}Vulkan Support: ENABLED${NC}"
-            ls -lh "$LLAMA_PATH/bin/libggml-vulkan.so" | awk '{print "  Vulkan Library Size: " $5}'
+            echo -e "    ${GREEN}Vulkan: ENABLED${NC}"
+            ls -lh "$LLAMA_PATH/bin/libggml-vulkan.so" | awk '{print "      Library Size: " $5}'
         else
-            echo -e "  ${RED}Vulkan Support: NOT FOUND${NC}"
+            echo -e "    ${YELLOW}Vulkan: NOT FOUND${NC}"
         fi
     else
         echo "  Not found"
@@ -114,8 +158,14 @@ update_llama() {
     git pull origin master
 
     echo -e "\n${CYAN}Rebuilding with Vulkan support...${NC}"
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Build directory not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
-    cmake --build . -j$(nproc)
+    cmake --build . -j$(nproc 2>/dev/null || echo 4)
 
     if [ $? -eq 0 ]; then
         echo -e "\n${GREEN}Update completed successfully!${NC}"
@@ -145,6 +195,12 @@ list_devices() {
 
     echo -e "${CYAN}Checking available devices...${NC}\n"
 
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
     if [ -f "./bin/llama-cli" ]; then
         ./bin/llama-cli --list-devices 2>&1 | head -20

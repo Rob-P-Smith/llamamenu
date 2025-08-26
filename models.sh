@@ -104,6 +104,13 @@ download_model() {
 
     echo -e "\n${CYAN}Downloading to: $target_file${NC}\n"
 
+    # Check if wget is available
+    if ! command -v wget &> /dev/null; then
+        echo -e "${RED}wget is not installed. Please install it first.${NC}"
+        press_any_key
+        return
+    fi
+
     # Download with progress bar
     wget --show-progress -O "$target_file" "$url"
 
@@ -137,7 +144,7 @@ test_model() {
     for i in "${!models[@]}"; do
         friendly_name=$(get_friendly_name "${models[$i]}")
         basename=$(basename "${models[$i]}")
-        echo -e "${BLUE}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "${CYAN}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
         echo -e "    $basename"
     done
 
@@ -161,19 +168,25 @@ test_model() {
     echo -e "${MAGENTA}GPU Layers: $gpu_layers${NC}"
     echo -e "Type 'exit' or press Ctrl+C to quit\n"
 
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
+    # Use simpler command for better compatibility
     ./bin/llama-cli -m "$selected_model" \
         -i \
         --interactive-first \
         --color \
         -c 4096 \
-        -t $(nproc) \
+        -t ${THREADS:-$(nproc 2>/dev/null || echo 4)} \
         -ngl $gpu_layers \
         --temp 0.7 \
         --repeat-penalty 1.1 \
-        -r "User:" \
-        --in-prefix " " \
-        --in-suffix "Assistant:"
+        -n -1 \
+        --keep -1
 
     press_any_key
 }
@@ -197,7 +210,7 @@ benchmark_model() {
     for i in "${!models[@]}"; do
         friendly_name=$(get_friendly_name "${models[$i]}")
         basename=$(basename "${models[$i]}")
-        echo -e "${BLUE}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
+        echo -e "${CYAN}$((i+1)))${NC} ${BOLD}$friendly_name${NC}"
         echo -e "    $basename"
     done
 
@@ -220,6 +233,12 @@ benchmark_model() {
     echo -e "\n${CYAN}Running benchmark for ${BOLD}$selected_model_name${NC}...${NC}"
     echo -e "${MAGENTA}GPU Layers: $gpu_layers${NC}\n"
 
+    if [ ! -d "$LLAMA_PATH" ]; then
+        echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
+        press_any_key
+        return
+    fi
+    
     cd "$LLAMA_PATH"
     ./bin/llama-bench -m "$selected_model" -t $(nproc) -ngl $gpu_layers
 
