@@ -3,6 +3,9 @@
 # UI Module
 # Handles all UI-related functions including colors, headers, and menus
 
+# Enable strict mode
+set -u  # Exit on undefined variables
+
 # Color definitions
 export RED='\033[0;31m'
 export GREEN='\033[0;32m'
@@ -163,27 +166,29 @@ press_any_key() {
 
 # Safe watch function that can be interrupted without killing the script
 safe_watch() {
-    local command="$1"
+    local function_name="$1"
     local message="${2:-Press 'q' to return to menu}"
-    
+
+    if ! declare -f "$function_name" >/dev/null; then
+        echo -e "${RED}Invalid function: $function_name${NC}"
+        return 1
+    fi
+
     echo -e "${YELLOW}$message${NC}\n"
-    
-    # Set up trap to handle interruption
+
     trap 'return 0' INT
-    
+
     while true; do
-        # Check for 'q' key press with timeout
-        if read -t 1 -n 1 key; then
+        if read -t 1 -n 1 key 2>/dev/null; then
             if [[ $key = "q" ]]; then
                 break
             fi
         fi
-        
-        # Execute the command
-        eval "$command"
+
+        clear
+        "$function_name"
     done
-    
-    # Reset trap
+
     trap - INT
     return 0
 }

@@ -1,7 +1,10 @@
 #!/bin/bash
 
-# Server Module  
+# Server Module
 # Handles all server-related operations
+
+# Enable strict mode
+set -u  # Exit on undefined variables
 
 # Start server with GPU support and Jinja option
 start_server() {
@@ -11,13 +14,14 @@ start_server() {
     # Check if already running
     if [ -f "$SERVICE_PID_FILE" ]; then
         local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
-        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if is_llama_server_running "$pid"; then
             echo -e "${RED}Server is already running! (PID: $pid)${NC}"
             echo -e "Stop it first before starting a new instance."
             press_any_key
             return
         else
             # Clean up stale PID file
+            echo -e "${YELLOW}Cleaning up stale PID file${NC}"
             rm -f "$SERVICE_PID_FILE"
         fi
     fi
@@ -71,21 +75,19 @@ start_server() {
         echo -e "${YELLOW}Note: Built for ${gpu_backend^^} but system has ${available_backend^^} available.${NC}"
     fi
 
-    echo -n -e "Number of layers to offload to GPU (default: 999 for full offload): "
-    read gpu_layers
-    gpu_layers=${gpu_layers:-999}
+    gpu_layers=$(read_validated_integer "Number of layers to offload to GPU" 999 0 999)
 
     echo -n -e "Split mode (none/layer/row, default: layer): "
     read split_mode
     split_mode=${split_mode:-layer}
 
-    echo -n -e "Main GPU index (default: 0): "
-    read main_gpu
-    main_gpu=${main_gpu:-0}
+    main_gpu=$(read_validated_integer "Main GPU index" 0 0 8)
 
-    echo -n -e "Disable KV offload? (y/N): "
-    read -n 1 no_kv_offload
-    echo
+    if prompt_yes_no "Disable KV offload?"; then
+        no_kv_offload="y"
+    else
+        no_kv_offload="N"
+    fi
 
     # KV Cache Quantization Configuration
     echo -e "\n${MAGENTA}${BOLD}KV Cache Quantization:${NC}"
@@ -116,19 +118,23 @@ start_server() {
     read kv_cache_choice
     
     case $kv_cache_choice in
-        2) 
+        2)
             kv_cache_type="q8_0"
             echo -e "${YELLOW}Note: Enabling flash attention for KV quantization${NC}"
-            echo -n -e "Try without flash attention if it fails? (y/N): "
-            read -n 1 try_without_flash
-            echo
+            if prompt_yes_no "Try without flash attention if it fails?"; then
+                try_without_flash="y"
+            else
+                try_without_flash="N"
+            fi
             ;;
-        3) 
+        3)
             kv_cache_type="q4_0"
             echo -e "${YELLOW}Note: Enabling flash attention for KV quantization${NC}"
-            echo -n -e "Try without flash attention if it fails? (y/N): "
-            read -n 1 try_without_flash
-            echo
+            if prompt_yes_no "Try without flash attention if it fails?"; then
+                try_without_flash="y"
+            else
+                try_without_flash="N"
+            fi
             ;;
         *) kv_cache_type="" ;;  # Default FP16
     esac
@@ -139,10 +145,12 @@ start_server() {
     echo -e "This is required for AI agents and function calling in Continue/OpenWebUI."
     echo -e "${GREEN}  y = Yes${NC} - Enable for tool calling/function support"
     echo -e "${RED}  N = No${NC}  - Required for GPT-OSS models (default)"
-    echo -n -e "Enable Jinja? (y/N): "
-    read -n 1 use_jinja
-    echo
-    use_jinja=${use_jinja:-N}
+
+    if prompt_yes_no "Enable Jinja?"; then
+        use_jinja="y"
+    else
+        use_jinja="N"
+    fi
 
     # Chat template selection if Jinja is enabled
     chat_template=""
@@ -184,57 +192,50 @@ start_server() {
     cpu_threads=$(nproc)
     echo -e "\n${CYAN}Server Configuration:${NC}"
 
-    echo -n -e "Number of CPU threads (default: $cpu_threads): "
-    read threads
-    threads=${threads:-$cpu_threads}
+    threads=$(read_validated_integer "Number of CPU threads" "$cpu_threads" 1 128)
 
-    echo -n -e "Context size (default: 16384): "
-    read context
-    context=${context:-16384}
+    context=$(read_validated_integer "Context size" 16384 512 1000000)
 
-    echo -n -e "Batch size (default: 2048): "
-    read batch
-    batch=${batch:-2048}
+    batch=$(read_validated_integer "Batch size" 2048 128 16384)
 
-    echo -n -e "Port (default: 8080): "
-    read port
-    port=${port:-8080}
+    port=$(read_validated_integer "Port" 8078 1024 65535)
 
     echo -n -e "Host (default: 0.0.0.0): "
     read host
     host=${host:-0.0.0.0}
 
-    echo -n -e "Max parallel requests (default: 4): "
-    read parallel
-    parallel=${parallel:-4}
+    parallel=$(read_validated_integer "Max parallel requests" 4 1 32)
 
     # Add model alias for friendly name
     echo -n -e "Model alias/name (default: $selected_model_name): "
     read model_alias
     model_alias=${model_alias:-$selected_model_name}
     
-    # Sampling parameters
-    echo -e "\n${MAGENTA}${BOLD}Sampling Parameters:${NC}"
-    
-    echo -n -e "Temperature (default: 0.7): "
-    read temperature
-    temperature=${temperature:-0.7}
-    
-    echo -n -e "Top-K (default: 40): "
-    read top_k
-    top_k=${top_k:-40}
-    
-    echo -n -e "Top-P (default: 0.95): "
-    read top_p
-    top_p=${top_p:-0.95}
-    
-    echo -n -e "Min-P (default: 0.05): "
-    read min_p
-    min_p=${min_p:-0.05}
-    
-    echo -n -e "Repeat penalty (default: 1.1): "
-    read repeat_penalty
-    repeat_penalty=${repeat_penalty:-1.1}
+    # Sampling parameters (Qwen3 defaults)
+    echo -e "\n${MAGENTA}${BOLD}Sampling Parameters (Qwen3 Defaults):${NC}"
+
+    temperature=$(read_validated_float "Temperature" 0.7 0.0 2.0)
+
+    top_k=$(read_validated_integer "Top-K" 20 1 100)
+
+    top_p=$(read_validated_float "Top-P" 0.8 0.0 1.0)
+
+    min_p=$(read_validated_float "Min-P" 0.0 0.0 1.0)
+
+    repeat_penalty=$(read_validated_float "Repeat penalty" 1.0 1.0 2.0)
+
+    # Prefix Caching Configuration
+    echo -e "\n${MAGENTA}${BOLD}Prefix Caching (KV Cache Reuse):${NC}"
+    echo -e "${YELLOW}Enable prompt prefix caching for faster repeated requests${NC}"
+    echo -e "${CYAN}This speeds up requests with similar prompt prefixes (system prompts, context, etc.)${NC}"
+
+    if prompt_yes_no "Enable prefix caching?" "Y"; then
+        cache_reuse=$(read_validated_integer "Cache reuse chunk size (recommended: 256-768)" 512 64 2048)
+        echo -e "${GREEN}Prefix caching enabled with chunk size: $cache_reuse${NC}"
+    else
+        cache_reuse=0
+        echo -e "${YELLOW}Prefix caching disabled${NC}"
+    fi
 
     # System prompt and context management removed - not supported in current versions
     # These should be handled via the API when making requests
@@ -258,7 +259,8 @@ start_server() {
         --top-k $top_k \
         --top-p $top_p \
         --min-p $min_p \
-        --repeat-penalty $repeat_penalty"
+        --repeat-penalty $repeat_penalty \
+        --cache-reuse $cache_reuse"
 
     # Add Jinja flag if enabled
     if [ "$use_jinja" = "y" ] || [ "$use_jinja" = "Y" ]; then
@@ -317,6 +319,9 @@ start_server() {
     if [ ! -z "$kv_cache_type" ]; then
         echo -e "${MAGENTA}KV Cache: ${kv_cache_type^^} quantization${NC}"
     fi
+    if [ "$cache_reuse" -gt 0 ]; then
+        echo -e "${MAGENTA}Prefix Caching: ENABLED (chunk size: $cache_reuse)${NC}"
+    fi
     if [ "$use_jinja" = "y" ] || [ "$use_jinja" = "Y" ]; then
         echo -e "${GREEN}Tool Calling: ENABLED (Jinja)${NC}"
         if [ ! -z "$chat_template" ]; then
@@ -338,7 +343,7 @@ start_server() {
     echo $server_pid > "$SERVICE_PID_FILE"
 
     # Save configs
-    cat > /tmp/llama-server-config.sh << EOFC
+    cat > "$TEMP_CONFIG_FILE" << EOFC
 MODEL="$selected_model"
 MODEL_ALIAS="$model_alias"
 THREADS=$threads
@@ -363,12 +368,17 @@ MIN_P=$min_p
 REPEAT_PENALTY=$repeat_penalty
 SYSTEM_PROMPT="$system_prompt"
 KEEP_TOKENS=$keep_tokens
+CACHE_REUSE=$cache_reuse
 EOFC
 
     # Also save as persistent config
-    save_persistent_config "$selected_model" "$model_alias" $threads $context $batch "$host" $port $parallel $gpu_layers "$split_mode" $main_gpu "$no_kv_offload" "$use_jinja" "$chat_template" "$kv_cache_type" "$template_mode" $temperature $top_k $top_p $min_p $repeat_penalty "$gpu_backend" "$system_prompt" $keep_tokens
+    save_persistent_config "$selected_model" "$model_alias" $threads $context $batch "$host" $port $parallel $gpu_layers "$split_mode" $main_gpu "$no_kv_offload" "$use_jinja" "$chat_template" "$kv_cache_type" "$template_mode" $temperature $top_k $top_p $min_p $repeat_penalty "$gpu_backend" "$system_prompt" $keep_tokens $cache_reuse
 
-    sleep 3
+    echo -n "${CYAN}Starting server..."
+    sleep 3 &
+    show_spinner $!
+    wait $!
+    echo -e "${NC}"
 
     if kill -0 $server_pid 2>/dev/null; then
         echo -e "${GREEN}Server started successfully!${NC}"
@@ -386,51 +396,110 @@ EOFC
     press_any_key
 }
 
+# Stop server by name (fallback/alternative method)
+stop_server_by_name() {
+    local model_pattern="${1:-llama-server}"
+
+    # Find llama-server processes
+    local pids=$(pgrep -f "$model_pattern")
+
+    if [ -z "$pids" ]; then
+        echo -e "${YELLOW}No llama-server process found${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}Found llama-server processes: $pids${NC}"
+
+    # Send TERM to all matching
+    echo -e "Sending TERM signal..."
+    pkill -TERM -f "$model_pattern" 2>/dev/null
+
+    sleep 2
+
+    # Check if any still running
+    if pgrep -f "$model_pattern" &> /dev/null; then
+        echo -e "${YELLOW}Forcing shutdown...${NC}"
+        pkill -9 -f "$model_pattern" 2>/dev/null
+        sleep 1
+    fi
+
+    # Verify all stopped
+    if pgrep -f "$model_pattern" &> /dev/null; then
+        echo -e "${RED}Failed to stop all processes${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}All llama-server processes stopped${NC}"
+    return 0
+}
+
 # Stop server
 stop_server() {
     show_header
     echo -e "${YELLOW}${BOLD}Stop Llama Server${NC}\n"
 
     if [ ! -f "$SERVICE_PID_FILE" ]; then
-        echo -e "${RED}No PID file found. Server might not be running.${NC}"
-        press_any_key
-        return
-    fi
-
-    pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
-    
-    if [ -z "$pid" ] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}Invalid PID in file. Cleaning up.${NC}"
-        rm -f "$SERVICE_PID_FILE"
-        press_any_key
-        return
-    fi
-
-    if kill -0 $pid 2>/dev/null; then
-        echo -e "Stopping server (PID: $pid)..."
-        kill -TERM $pid 2>/dev/null
-        
-        # Give it time to shutdown gracefully
-        for i in {1..10}; do
-            if ! kill -0 $pid 2>/dev/null; then
-                break
-            fi
-            sleep 0.5
-        done
-
-        if kill -0 $pid 2>/dev/null; then
-            echo -e "${YELLOW}Server didn't stop gracefully. Force killing...${NC}"
-            kill -9 $pid 2>/dev/null
+        echo -e "${YELLOW}No PID file found. Checking for running servers...${NC}"
+        # Try stopping by name as fallback
+        if stop_server_by_name; then
+            rm -f "$SERVICE_PID_FILE" 2>/dev/null
         fi
-
-        rm -f "$SERVICE_PID_FILE"
-        echo -e "${GREEN}Server stopped successfully!${NC}"
-    else
-        echo -e "${YELLOW}Server process not found. Cleaning up PID file.${NC}"
-        rm -f "$SERVICE_PID_FILE"
+        press_any_key
+        return
     fi
 
+    local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
+
+    if ! is_llama_server_running "$pid"; then
+        echo -e "${YELLOW}Server is not running (stale PID file). Checking for other instances...${NC}"
+        rm -f "$SERVICE_PID_FILE"
+        # Try stopping by name as fallback
+        if pgrep -f "llama-server" &> /dev/null; then
+            echo -e "${CYAN}Found running llama-server instances${NC}"
+            stop_server_by_name
+        fi
+        press_any_key
+        return
+    fi
+
+    echo -e "Stopping server (PID: $pid)..."
+
+    # Verify this is actually our llama-server before killing
+    if ! is_llama_server_running "$pid"; then
+        echo -e "${RED}PID $pid is not a llama-server process!${NC}"
+        rm -f "$SERVICE_PID_FILE"
+        press_any_key
+        return
+    fi
+
+    kill -TERM $pid 2>/dev/null
+
+    # Give it time to shutdown gracefully
+    for i in {1..10}; do
+        if ! is_llama_server_running "$pid"; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if is_llama_server_running "$pid"; then
+        echo -e "${YELLOW}Server didn't stop gracefully. Force killing...${NC}"
+        kill -9 $pid 2>/dev/null
+        sleep 1
+
+        # Check if still running after force kill
+        if is_llama_server_running "$pid"; then
+            rm -f "$SERVICE_PID_FILE"
+            echo -e "${RED}Failed to stop server!${NC}"
+            press_any_key
+            return $E_COMMAND_FAILED
+        fi
+    fi
+
+    rm -f "$SERVICE_PID_FILE"
+    echo -e "${GREEN}Server stopped successfully!${NC}"
     press_any_key
+    return $E_SUCCESS
 }
 
 # Restart server
@@ -438,7 +507,7 @@ restart_server() {
     show_header
     echo -e "${YELLOW}${BOLD}Restart Llama Server${NC}\n"
 
-    if [ ! -f /tmp/llama-server-config.sh ]; then
+    if [ ! -f "$TEMP_CONFIG_FILE" ]; then
         echo -e "${RED}No previous server configuration found!${NC}"
         echo -e "Please start the server first using option 4."
         press_any_key
@@ -448,27 +517,30 @@ restart_server() {
     # Stop if running
     if [ -f "$SERVICE_PID_FILE" ]; then
         local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
-        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if is_llama_server_running "$pid"; then
             echo -e "Stopping current server..."
             kill -TERM $pid 2>/dev/null
-            
+
             # Give it time to shutdown gracefully
             for i in {1..10}; do
-                if ! kill -0 $pid 2>/dev/null; then
+                if ! is_llama_server_running "$pid"; then
                     break
                 fi
                 sleep 0.5
             done
-            
-            if kill -0 $pid 2>/dev/null; then
+
+            if is_llama_server_running "$pid"; then
+                echo -e "${YELLOW}Forcing shutdown...${NC}"
                 kill -9 $pid 2>/dev/null
             fi
+        else
+            echo -e "${YELLOW}Server not running (stale PID file)${NC}"
         fi
         rm -f "$SERVICE_PID_FILE"
     fi
 
     # Load previous config
-    source /tmp/llama-server-config.sh
+    source "$TEMP_CONFIG_FILE"
 
     echo -e "Restarting with previous configuration..."
     echo -e "Model: $MODEL_ALIAS"
@@ -494,10 +566,11 @@ restart_server() {
         --split-mode $SPLIT_MODE \
         --main-gpu $MAIN_GPU \
         --temp ${TEMPERATURE:-0.7} \
-        --top-k ${TOP_K:-40} \
-        --top-p ${TOP_P:-0.95} \
-        --min-p ${MIN_P:-0.05} \
-        --repeat-penalty ${REPEAT_PENALTY:-1.1}"
+        --top-k ${TOP_K:-20} \
+        --top-p ${TOP_P:-0.8} \
+        --min-p ${MIN_P:-0.0} \
+        --repeat-penalty ${REPEAT_PENALTY:-1.0} \
+        --cache-reuse ${CACHE_REUSE:-512}"
 
     # Add Jinja flag if it was enabled
     if [ "$USE_JINJA" = "y" ] || [ "$USE_JINJA" = "Y" ]; then
@@ -549,7 +622,11 @@ restart_server() {
     server_pid=$!
     echo $server_pid > "$SERVICE_PID_FILE"
 
-    sleep 3
+    echo -n "${CYAN}Restarting server..."
+    sleep 3 &
+    show_spinner $!
+    wait $!
+    echo -e "${NC}"
 
     if kill -0 $server_pid 2>/dev/null; then
         echo -e "${GREEN}Server restarted successfully!${NC}"
@@ -577,17 +654,18 @@ start_with_saved_config() {
     # Check if already running
     if [ -f "$SERVICE_PID_FILE" ]; then
         local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
-        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if is_llama_server_running "$pid"; then
             echo -e "${RED}Server is already running! (PID: $pid)${NC}"
             echo -e "Stop it first before starting a new instance."
             press_any_key
             return
         else
             # Clean up stale PID file
+            echo -e "${YELLOW}Cleaning up stale PID file${NC}"
             rm -f "$SERVICE_PID_FILE"
         fi
     fi
-    
+
     # Load saved config
     source "$PERSISTENT_CONFIG"
     
@@ -615,11 +693,12 @@ start_with_saved_config() {
         --split-mode $SPLIT_MODE \
         --main-gpu $MAIN_GPU \
         --temp ${TEMPERATURE:-0.7} \
-        --top-k ${TOP_K:-40} \
-        --top-p ${TOP_P:-0.95} \
-        --min-p ${MIN_P:-0.05} \
-        --repeat-penalty ${REPEAT_PENALTY:-1.1}"
-    
+        --top-k ${TOP_K:-20} \
+        --top-p ${TOP_P:-0.8} \
+        --min-p ${MIN_P:-0.0} \
+        --repeat-penalty ${REPEAT_PENALTY:-1.0} \
+        --cache-reuse ${CACHE_REUSE:-512}"
+
     # Add Jinja flag if enabled
     if [ "$USE_JINJA" = "y" ] || [ "$USE_JINJA" = "Y" ]; then
         server_cmd="$server_cmd --jinja"
@@ -669,12 +748,16 @@ start_with_saved_config() {
     
     server_pid=$!
     echo $server_pid > "$SERVICE_PID_FILE"
-    
+
     # Also save to temp config for restart
-    cp "$PERSISTENT_CONFIG" /tmp/llama-server-config.sh
-    
-    sleep 3
-    
+    cp "$PERSISTENT_CONFIG" "$TEMP_CONFIG_FILE"
+
+    echo -n "${CYAN}Starting server..."
+    sleep 3 &
+    show_spinner $!
+    wait $!
+    echo -e "${NC}"
+
     if kill -0 $server_pid 2>/dev/null; then
         echo -e "${GREEN}Server started successfully!${NC}"
         echo -e "PID: $server_pid"
@@ -683,8 +766,40 @@ start_with_saved_config() {
         echo -e "${RED}Failed to start server!${NC}"
         rm -f "$SERVICE_PID_FILE"
     fi
-    
+
     press_any_key
+}
+
+# Helper function to display server metrics
+show_server_metrics() {
+    echo -e "${CYAN}${BOLD}Server Statistics - $(date)${NC}\n"
+
+    # Get server URL
+    local server_url="http://0.0.0.0:8078"
+    if [ -f "$TEMP_CONFIG_FILE" ]; then
+        source "$TEMP_CONFIG_FILE"
+        server_url="http://$HOST:$PORT"
+
+        echo -e "${MAGENTA}Model: $MODEL_ALIAS | GPU Layers: $GPU_LAYERS | Context: $CONTEXT${NC}"
+        if [ "$USE_JINJA" = "y" ] || [ "$USE_JINJA" = "Y" ]; then
+            echo -e "${GREEN}Tool Calling: ENABLED${NC}"
+        fi
+        echo
+    fi
+
+    # Try to get metrics
+    if command -v curl &> /dev/null; then
+        echo -e "${YELLOW}Performance Metrics:${NC}"
+        curl -s "$server_url/metrics" 2>/dev/null | grep -E "llama_|process_" | head -20
+
+        echo -e "\n${YELLOW}Health Status:${NC}"
+        curl -s "$server_url/health" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Unable to fetch health"
+
+        echo -e "\n${YELLOW}Slots Status:${NC}"
+        curl -s "$server_url/slots" 2>/dev/null | python3 -m json.tool 2>/dev/null | head -30
+    else
+        echo -e "${RED}curl not installed. Install it to view stats.${NC}"
+    fi
 }
 
 # View server stats with safe interrupt
@@ -697,7 +812,7 @@ view_stats() {
         press_any_key
         return
     fi
-    
+
     local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         echo -e "${RED}Server is not running!${NC}"
@@ -706,58 +821,17 @@ view_stats() {
     fi
 
     # Get server config
-    if [ -f /tmp/llama-server-config.sh ]; then
-        source /tmp/llama-server-config.sh
+    if [ -f "$TEMP_CONFIG_FILE" ]; then
+        source "$TEMP_CONFIG_FILE"
         server_url="http://$HOST:$PORT"
     else
-        server_url="http://0.0.0.0:8080"
+        server_url="http://0.0.0.0:8078"
     fi
 
-    echo -e "${CYAN}Fetching stats from $server_url/metrics${NC}"
-    echo -e "${YELLOW}Press 'q' to return to menu${NC}\n"
+    echo -e "${CYAN}Fetching stats from $server_url/metrics${NC}\n"
 
-    # Monitor stats with safe interrupt
-    trap 'return 0' INT
-    
-    while true; do
-        clear
-        echo -e "${CYAN}${BOLD}Server Statistics - $(date)${NC}\n"
-
-        # Server config info
-        if [ -f /tmp/llama-server-config.sh ]; then
-            source /tmp/llama-server-config.sh
-            echo -e "${MAGENTA}Model: $MODEL_ALIAS | GPU Layers: $GPU_LAYERS | Context: $CONTEXT${NC}"
-            if [ "$USE_JINJA" = "y" ] || [ "$USE_JINJA" = "Y" ]; then
-                echo -e "${GREEN}Tool Calling: ENABLED${NC}"
-            fi
-            echo
-        fi
-
-        # Try to get metrics
-        if command -v curl &> /dev/null; then
-            echo -e "${YELLOW}Performance Metrics:${NC}"
-            curl -s "$server_url/metrics" 2>/dev/null | grep -E "llama_|process_" | head -20
-
-            echo -e "\n${YELLOW}Health Status:${NC}"
-            curl -s "$server_url/health" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Unable to fetch health"
-
-            echo -e "\n${YELLOW}Slots Status:${NC}"
-            curl -s "$server_url/slots" 2>/dev/null | python3 -m json.tool 2>/dev/null | head -30
-        else
-            echo -e "${RED}curl not installed. Install it to view stats.${NC}"
-        fi
-        
-        echo -e "\n${YELLOW}Press 'q' to return to menu${NC}"
-        
-        # Check for 'q' key press with timeout
-        if read -t 2 -n 1 key; then
-            if [[ $key = "q" ]]; then
-                break
-            fi
-        fi
-    done
-    
-    trap - INT
+    # Use safe_watch to monitor metrics
+    safe_watch show_server_metrics "Press 'q' to return to menu"
 }
 
 # Watch logs with safe interrupt
@@ -790,12 +864,31 @@ test_tool_calling() {
     show_header
     echo -e "${YELLOW}${BOLD}Test Tool Calling / Function Call Support${NC}\n"
 
+    # Check dependencies first
+    local missing_deps=()
+    command -v curl &> /dev/null || missing_deps+=("curl")
+    command -v python3 &> /dev/null || missing_deps+=("python3")
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${RED}Missing required dependencies:${NC}"
+        for dep in "${missing_deps[@]}"; do
+            echo -e "  ${YELLOW}- $dep${NC}"
+        done
+        echo
+        echo -e "${CYAN}Install with:${NC}"
+        echo -e "  ${GREEN}sudo apt install ${missing_deps[*]}${NC}  # Debian/Ubuntu"
+        echo -e "  ${GREEN}sudo dnf install ${missing_deps[*]}${NC}  # Fedora/RHEL"
+        echo -e "  ${GREEN}sudo pacman -S ${missing_deps[*]}${NC}     # Arch"
+        press_any_key
+        return $E_COMMAND_FAILED
+    fi
+
     if [ ! -f "$SERVICE_PID_FILE" ]; then
         echo -e "${RED}Server is not running!${NC}"
         press_any_key
         return
     fi
-    
+
     local pid=$(cat "$SERVICE_PID_FILE" 2>/dev/null)
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         echo -e "${RED}Server is not running! Start it first with option 4.${NC}"
@@ -804,21 +897,13 @@ test_tool_calling() {
     fi
 
     # Get server config
-    if [ -f /tmp/llama-server-config.sh ]; then
-        source /tmp/llama-server-config.sh
+    if [ -f "$TEMP_CONFIG_FILE" ]; then
+        source "$TEMP_CONFIG_FILE"
         server_url="http://$HOST:$PORT"
     else
-        server_url="http://0.0.0.0:8080"
+        server_url="http://0.0.0.0:8078"
     fi
 
-    # Check if curl is available
-    if ! command -v curl &> /dev/null; then
-        echo -e "${RED}curl is required but not installed.${NC}"
-        echo -e "${YELLOW}Please install curl to test tool calling.${NC}"
-        press_any_key
-        return
-    fi
-    
     echo -e "${CYAN}Testing server at $server_url${NC}\n"
 
     # Check if Jinja is enabled
@@ -827,10 +912,8 @@ test_tool_calling() {
         echo -e "${YELLOW}Tool calling will NOT work without Jinja enabled.${NC}"
         echo -e "${CYAN}GPT-OSS models typically don't support tool calling.${NC}\n"
         echo -e "Do you still want to test? This may crash the server."
-        echo -n -e "${GREEN}Continue anyway? (y/N): ${NC}"
-        read -n 1 continue_test
-        echo
-        if [ "$continue_test" != "y" ] && [ "$continue_test" != "Y" ]; then
+
+        if ! prompt_yes_no "${GREEN}Continue anyway?${NC}"; then
             echo -e "\n${GREEN}Test cancelled. Restart server with Jinja enabled for tool calling.${NC}"
             press_any_key
             return
@@ -839,7 +922,7 @@ test_tool_calling() {
 
     # First do a simple test
     echo -e "${GREEN}1. Testing basic chat completion (safe test)...${NC}\n"
-    simple_response=$(curl -s -X POST "$server_url/v1/chat/completions" \
+    simple_response=$(curl -s -w "\n%{http_code}" -X POST "$server_url/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
             "model": "'"$MODEL_ALIAS"'",
@@ -851,20 +934,45 @@ test_tool_calling() {
             ],
             "max_tokens": 50
         }' 2>&1)
-    
-    echo -e "${CYAN}Basic response:${NC}"
-    echo "$simple_response" | python3 -m json.tool 2>/dev/null | head -20 || echo "$simple_response" | head -5
-    
-    if ! echo "$simple_response" | grep -q "content\|choices"; then
-        echo -e "\n${RED}Basic chat is not working. Server may have issues.${NC}"
+
+    # Extract HTTP status code and response body
+    http_code=$(echo "$simple_response" | tail -1)
+    response_body=$(echo "$simple_response" | sed '$d')
+
+    # Check HTTP status code
+    if [ "$http_code" != "200" ]; then
+        echo -e "${RED}Server returned HTTP $http_code${NC}"
+        echo -e "${YELLOW}Response:${NC}"
+        echo "$response_body" | head -10
+        echo
+        echo -e "${RED}Server is not responding correctly. Check server logs.${NC}"
         press_any_key
-        return
+        return $E_COMMAND_FAILED
+    fi
+
+    # Validate response is valid JSON
+    if ! echo "$response_body" | python3 -c "import sys, json; json.load(sys.stdin)" 2>/dev/null; then
+        echo -e "${RED}Server returned invalid JSON${NC}"
+        echo -e "${YELLOW}Response:${NC}"
+        echo "$response_body" | head -10
+        press_any_key
+        return $E_COMMAND_FAILED
+    fi
+
+    echo -e "${CYAN}Basic response:${NC}"
+    echo "$response_body" | python3 -m json.tool 2>/dev/null | head -20
+
+    if ! echo "$response_body" | grep -q "content\|choices"; then
+        echo -e "\n${RED}Basic chat is not working. Server may have issues.${NC}"
+        echo -e "${YELLOW}Response received but missing expected fields.${NC}"
+        press_any_key
+        return $E_COMMAND_FAILED
     fi
     
     echo -e "\n${GREEN}2. Testing function call request (may fail on GPT-OSS)...${NC}\n"
 
     # Test request with function calling
-    response=$(curl -s -X POST "$server_url/v1/chat/completions" \
+    tool_response=$(curl -s -w "\n%{http_code}" -X POST "$server_url/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
             "model": "'"$MODEL_ALIAS"'",
@@ -902,17 +1010,41 @@ test_tool_calling() {
             "max_tokens": 500
         }' 2>&1)
 
-    echo -e "${CYAN}Response:${NC}"
-    echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+    # Extract HTTP status code and response body
+    tool_http_code=$(echo "$tool_response" | tail -1)
+    tool_body=$(echo "$tool_response" | sed '$d')
 
-    # Check response
-    if echo "$response" | grep -q "jinja"; then
+    # Check HTTP status code
+    if [ "$tool_http_code" != "200" ]; then
+        echo -e "${RED}Server returned HTTP $tool_http_code${NC}"
+        echo -e "${YELLOW}Response:${NC}"
+        echo "$tool_body" | head -10
+        echo
+        echo -e "${YELLOW}Tool calling test failed. This is expected for GPT-OSS models.${NC}"
+        press_any_key
+        return
+    fi
+
+    # Validate response is valid JSON
+    if ! echo "$tool_body" | python3 -c "import sys, json; json.load(sys.stdin)" 2>/dev/null; then
+        echo -e "${YELLOW}Server returned invalid JSON (this may happen on unsupported models)${NC}"
+        echo -e "${YELLOW}Response:${NC}"
+        echo "$tool_body" | head -10
+        press_any_key
+        return
+    fi
+
+    echo -e "${CYAN}Response:${NC}"
+    echo "$tool_body" | python3 -m json.tool 2>/dev/null | head -40
+
+    # Check response content
+    if echo "$tool_body" | grep -q "jinja"; then
         echo -e "\n${RED}Tool calling requires the --jinja flag!${NC}"
         echo -e "Restart the server with Jinja enabled (option 8) to use tool calling."
-    elif echo "$response" | grep -q "tool_calls\|function_call"; then
+    elif echo "$tool_body" | grep -q "tool_calls\|function_call"; then
         echo -e "\n${GREEN}✓ Tool calling is working!${NC}"
         echo -e "The server successfully processed the function call request."
-    elif echo "$response" | grep -q "error"; then
+    elif echo "$tool_body" | grep -q "error"; then
         echo -e "\n${YELLOW}Tool calling test returned an error.${NC}"
         echo -e "Check the server logs for more details."
     else

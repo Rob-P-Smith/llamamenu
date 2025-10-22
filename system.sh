@@ -3,6 +3,9 @@
 # System Module
 # Handles system information, GPU details, and llama.cpp updates
 
+# Enable strict mode
+set -u  # Exit on undefined variables
+
 # Enhanced system info with GPU details
 system_info() {
     show_header
@@ -128,7 +131,7 @@ update_llama() {
         echo -e "${RED}Not a git repository!${NC}"
         echo -e "Cannot update automatically."
         press_any_key
-        return
+        return $E_NOT_FOUND
     fi
 
     echo -e "${CYAN}Current directory: $llama_root${NC}\n"
@@ -136,38 +139,49 @@ update_llama() {
     cd "$llama_root"
 
     echo -e "Fetching updates..."
-    git fetch
+    if ! git fetch; then
+        echo -e "${RED}Failed to fetch updates${NC}"
+        press_any_key
+        return $E_NETWORK_ERROR
+    fi
 
     echo -e "\n${CYAN}Current version:${NC}"
     git log --oneline -1
 
     echo -e "\n${CYAN}Latest version:${NC}"
     git log --oneline origin/master -1
-
-    echo -n -e "\n${YELLOW}Update to latest version? (y/n): ${NC}"
-    read -n 1 update
     echo
 
-    if [ "$update" != "y" ] && [ "$update" != "Y" ]; then
+    if ! prompt_yes_no "${YELLOW}Update to latest version?${NC}"; then
         echo -e "${YELLOW}Update cancelled.${NC}"
         press_any_key
-        return
+        return $E_SUCCESS
     fi
 
     echo -e "\n${CYAN}Updating...${NC}"
-    git pull origin master
+    if ! git pull origin master; then
+        echo -e "${RED}Failed to pull updates${NC}"
+        press_any_key
+        return $E_NETWORK_ERROR
+    fi
 
     echo -e "\n${CYAN}Rebuilding with Vulkan support...${NC}"
     if [ ! -d "$LLAMA_PATH" ]; then
         echo -e "${RED}Build directory not found: $LLAMA_PATH${NC}"
         press_any_key
-        return
+        return $E_NOT_FOUND
     fi
-    
-    cd "$LLAMA_PATH"
-    cmake --build . -j$(nproc 2>/dev/null || echo 4)
 
-    if [ $? -eq 0 ]; then
+    cd "$LLAMA_PATH"
+    echo -n "${CYAN}Building..."
+    cmake --build . -j$(nproc 2>/dev/null || echo 4) > /tmp/cmake-build-$$.log 2>&1 &
+    local build_pid=$!
+    show_spinner $build_pid
+    wait $build_pid
+    local build_status=$?
+    echo -e "${NC}"
+
+    if [ $build_status -eq 0 ]; then
         echo -e "\n${GREEN}Update completed successfully!${NC}"
 
         # Verify Vulkan support still present
@@ -181,11 +195,18 @@ update_llama() {
         if strings "$LLAMA_PATH/bin/llama-server" 2>/dev/null | grep -q "jinja"; then
             echo -e "${GREEN}Jinja/Tool calling support verified!${NC}"
         fi
-    else
-        echo -e "\n${RED}Update failed!${NC}"
-    fi
 
-    press_any_key
+        rm -f /tmp/cmake-build-$$.log 2>/dev/null
+        press_any_key
+        return $E_SUCCESS
+    else
+        echo -e "\n${RED}Build failed!${NC}"
+        echo -e "${YELLOW}Last 20 lines of build log:${NC}"
+        tail -n 20 /tmp/cmake-build-$$.log 2>/dev/null || echo "No log available"
+        rm -f /tmp/cmake-build-$$.log 2>/dev/null
+        press_any_key
+        return $E_COMMAND_FAILED
+    fi
 }
 
 # List available devices

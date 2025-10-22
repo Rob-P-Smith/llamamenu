@@ -3,6 +3,9 @@
 # Models Module
 # Handles all model-related operations
 
+# Enable strict mode
+set -u  # Exit on undefined variables
+
 # View models
 view_models() {
     show_header
@@ -11,7 +14,7 @@ view_models() {
     if [ ! -d "$MODELS_DIR" ]; then
         echo -e "${RED}Models directory does not exist!${NC}"
         press_any_key
-        return
+        return $E_NOT_FOUND
     fi
 
     local count=0
@@ -26,11 +29,13 @@ view_models() {
 
     if [ $count -eq 0 ]; then
         echo -e "${RED}No GGUF models found in $MODELS_DIR${NC}"
-    else
-        echo -e "\n${GREEN}Total: $count model(s)${NC}"
+        press_any_key
+        return $E_NOT_FOUND
     fi
 
+    echo -e "\n${GREEN}Total: $count model(s)${NC}"
     press_any_key
+    return $E_SUCCESS
 }
 
 # Change models directory
@@ -51,10 +56,7 @@ change_models_dir() {
     new_dir="${new_dir/#\~/$HOME}"
 
     if [ ! -d "$new_dir" ]; then
-        echo -n -e "${YELLOW}Directory doesn't exist. Create it? (y/n): ${NC}"
-        read -n 1 create
-        echo
-        if [ "$create" = "y" ] || [ "$create" = "Y" ]; then
+        if prompt_yes_no "${YELLOW}Directory doesn't exist. Create it?${NC}"; then
             mkdir -p "$new_dir"
             echo -e "${GREEN}Directory created successfully!${NC}"
         else
@@ -104,6 +106,14 @@ download_model() {
 
     echo -e "\n${CYAN}Downloading to: $target_file${NC}\n"
 
+    # Check if models directory is writable
+    if [ ! -w "$MODELS_DIR" ]; then
+        echo -e "${RED}Error: No write permission for models directory: $MODELS_DIR${NC}"
+        echo -e "${YELLOW}Please check directory permissions or use a different directory${NC}"
+        press_any_key
+        return $E_PERMISSION
+    fi
+
     # Check if wget is available
     if ! command -v wget &> /dev/null; then
         echo -e "${RED}wget is not installed. Please install it first.${NC}"
@@ -113,15 +123,29 @@ download_model() {
 
     # Download with progress bar
     wget --show-progress -O "$target_file" "$url"
+    local wget_status=$?
 
-    if [ $? -eq 0 ]; then
+    if [ $wget_status -eq 0 ]; then
         echo -e "\n${GREEN}Download completed successfully!${NC}"
+        press_any_key
+        return $E_SUCCESS
     else
-        echo -e "\n${RED}Download failed!${NC}"
+        echo -e "\n${RED}Download failed with exit code $wget_status!${NC}"
+        case $wget_status in
+            1) echo -e "${YELLOW}Generic error${NC}" ;;
+            2) echo -e "${YELLOW}Parse error${NC}" ;;
+            3) echo -e "${YELLOW}File I/O error (check disk space and permissions)${NC}" ;;
+            4) echo -e "${YELLOW}Network failure${NC}" ;;
+            5) echo -e "${YELLOW}SSL verification failure${NC}" ;;
+            6) echo -e "${YELLOW}Username/password authentication failure${NC}" ;;
+            7) echo -e "${YELLOW}Protocol errors${NC}" ;;
+            8) echo -e "${YELLOW}Server issued an error response${NC}" ;;
+            *) echo -e "${YELLOW}Unknown error${NC}" ;;
+        esac
         rm -f "$target_file" 2>/dev/null
+        press_any_key
+        return $E_NETWORK_ERROR
     fi
-
-    press_any_key
 }
 
 # Test model with interactive chat (GPU accelerated)
@@ -160,9 +184,8 @@ test_model() {
     selected_model="${models[$((model_choice-1))]}"
     selected_model_name=$(get_friendly_name "$selected_model")
 
-    echo -n -e "\n${MAGENTA}Number of GPU layers to offload (default: 999): ${NC}"
-    read gpu_layers
-    gpu_layers=${gpu_layers:-999}
+    echo
+    gpu_layers=$(read_validated_integer "Number of GPU layers to offload" 999 0 999)
 
     echo -e "\n${CYAN}Starting interactive chat with ${BOLD}$selected_model_name${NC}..."
     echo -e "${MAGENTA}GPU Layers: $gpu_layers${NC}"
@@ -171,9 +194,15 @@ test_model() {
     if [ ! -d "$LLAMA_PATH" ]; then
         echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
         press_any_key
-        return
+        return $E_NOT_FOUND
     fi
-    
+
+    if [ ! -f "$LLAMA_PATH/bin/llama-cli" ]; then
+        echo -e "${RED}llama-cli not found: $LLAMA_PATH/bin/llama-cli${NC}"
+        press_any_key
+        return $E_NOT_FOUND
+    fi
+
     cd "$LLAMA_PATH"
     # Use simpler command for better compatibility
     ./bin/llama-cli -m "$selected_model" \
@@ -187,8 +216,17 @@ test_model() {
         --repeat-penalty 1.1 \
         -n -1 \
         --keep -1
+    local cli_status=$?
+
+    # Note: User may exit normally (Ctrl+C) which is not an error
+    if [ $cli_status -ne 0 ] && [ $cli_status -ne 130 ]; then
+        echo -e "\n${RED}Chat session ended with error (exit code $cli_status)${NC}"
+        press_any_key
+        return $E_COMMAND_FAILED
+    fi
 
     press_any_key
+    return $E_SUCCESS
 }
 
 # Benchmark model with GPU
@@ -226,9 +264,8 @@ benchmark_model() {
     selected_model="${models[$((model_choice-1))]}"
     selected_model_name=$(get_friendly_name "$selected_model")
 
-    echo -n -e "\n${MAGENTA}Number of GPU layers to offload (default: 999): ${NC}"
-    read gpu_layers
-    gpu_layers=${gpu_layers:-999}
+    echo
+    gpu_layers=$(read_validated_integer "Number of GPU layers to offload" 999 0 999)
 
     echo -e "\n${CYAN}Running benchmark for ${BOLD}$selected_model_name${NC}...${NC}"
     echo -e "${MAGENTA}GPU Layers: $gpu_layers${NC}\n"
@@ -236,13 +273,27 @@ benchmark_model() {
     if [ ! -d "$LLAMA_PATH" ]; then
         echo -e "${RED}Llama.cpp path not found: $LLAMA_PATH${NC}"
         press_any_key
-        return
+        return $E_NOT_FOUND
     fi
-    
+
+    if [ ! -f "$LLAMA_PATH/bin/llama-bench" ]; then
+        echo -e "${RED}llama-bench not found: $LLAMA_PATH/bin/llama-bench${NC}"
+        press_any_key
+        return $E_NOT_FOUND
+    fi
+
     cd "$LLAMA_PATH"
     ./bin/llama-bench -m "$selected_model" -t $(nproc) -ngl $gpu_layers
+    local bench_status=$?
+
+    if [ $bench_status -ne 0 ]; then
+        echo -e "\n${RED}Benchmark failed with exit code $bench_status${NC}"
+        press_any_key
+        return $E_COMMAND_FAILED
+    fi
 
     press_any_key
+    return $E_SUCCESS
 }
 
 # Convert model
@@ -279,12 +330,89 @@ convert_model() {
 
     cd "$LLAMA_PATH/.."
     python3 convert_hf_to_gguf.py "$hf_path" --outfile "$MODELS_DIR/$output_name"
+    local convert_status=$?
 
-    if [ $? -eq 0 ]; then
+    if [ $convert_status -eq 0 ]; then
         echo -e "${GREEN}Conversion completed!${NC}"
+        press_any_key
+        return $E_SUCCESS
     else
-        echo -e "${RED}Conversion failed!${NC}"
+        echo -e "${RED}Conversion failed with exit code $convert_status!${NC}"
+        case $convert_status in
+            1) echo -e "${YELLOW}Python script error${NC}" ;;
+            2) echo -e "${YELLOW}Invalid model format or missing files${NC}" ;;
+            126) echo -e "${YELLOW}Script not executable${NC}" ;;
+            127) echo -e "${YELLOW}Python3 not found${NC}" ;;
+            *) echo -e "${YELLOW}Unknown error - check model format and dependencies${NC}" ;;
+        esac
+        press_any_key
+        return $E_COMMAND_FAILED
+    fi
+}
+
+# Rename model (set custom friendly name)
+rename_model() {
+    show_header
+    echo -e "${YELLOW}${BOLD}Rename Model (Set Custom Display Name)${NC}\n"
+
+    models=()
+    while IFS= read -r model; do
+        models+=("$model")
+    done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
+
+    if [ ${#models[@]} -eq 0 ]; then
+        echo -e "${RED}No models found!${NC}"
+        press_any_key
+        return
     fi
 
+    echo -e "${CYAN}Available models:${NC}\n"
+
+    for i in "${!models[@]}"; do
+        friendly_name=$(get_friendly_name "${models[$i]}")
+        basename=$(basename "${models[$i]}")
+
+        # Check if this model has a custom name
+        local names_file="$HOME/.llamamenu-model-names.conf"
+        local has_custom=""
+        if [ -f "$names_file" ] && grep -qF "$basename=" "$names_file" 2>/dev/null; then
+            has_custom=" ${GREEN}[Custom]${NC}"
+        fi
+
+        echo -e "${CYAN}$((i+1)))${NC} ${BOLD}$friendly_name${NC}$has_custom"
+        echo -e "    File: $basename"
+        echo
+    done
+
+    echo -n -e "${GREEN}Select model number to rename: ${NC}"
+    read model_choice
+
+    if ! [[ "$model_choice" =~ ^[0-9]+$ ]] || [ "$model_choice" -lt 1 ] || [ "$model_choice" -gt ${#models[@]} ]; then
+        echo -e "${RED}Invalid selection!${NC}"
+        press_any_key
+        return
+    fi
+
+    selected_model="${models[$((model_choice-1))]}"
+    current_name=$(get_friendly_name "$selected_model")
+    auto_name=$(auto_generate_name "$selected_model")
+
+    echo -e "\n${CYAN}Current display name:${NC} ${BOLD}$current_name${NC}"
+    echo -e "${CYAN}Auto-generated name:${NC} $auto_name"
+    echo -e "${YELLOW}File name:${NC} $(basename "$selected_model")"
+    echo
+
+    new_name=$(prompt_string "Enter new display name" "$current_name")
+
+    if [ -z "$new_name" ]; then
+        echo -e "${RED}Name cannot be empty!${NC}"
+        press_any_key
+        return
+    fi
+
+    set_model_friendly_name "$selected_model" "$new_name"
+
+    echo -e "\n${GREEN}Model renamed successfully!${NC}"
+    echo -e "${CYAN}New name:${NC} ${BOLD}$new_name${NC}"
     press_any_key
 }

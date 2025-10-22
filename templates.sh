@@ -3,6 +3,9 @@
 # Templates Module
 # Handles server configuration templates
 
+# Enable strict mode
+set -u  # Exit on undefined variables
+
 # Templates file location - use the directory of the main script if SCRIPT_DIR not set
 SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}"
 export TEMPLATES_FILE="$SCRIPT_DIR/templates.json"
@@ -10,8 +13,68 @@ export TEMPLATES_FILE="$SCRIPT_DIR/templates.json"
 # Initialize templates file if it doesn't exist
 init_templates_file() {
     if [ ! -f "$TEMPLATES_FILE" ]; then
-        echo '{}' > "$TEMPLATES_FILE"
+        cat > "$TEMPLATES_FILE" << 'EOJSON'
+{
+  "_example": {
+    "MODEL": "/path/to/model.gguf",
+    "MODEL_ALIAS": "Example Model",
+    "THREADS": 8,
+    "CONTEXT": 4096,
+    "BATCH": 512,
+    "HOST": "0.0.0.0",
+    "PORT": 8078,
+    "PARALLEL": 4,
+    "GPU_LAYERS": 999,
+    "SPLIT_MODE": "layer",
+    "MAIN_GPU": 0,
+    "NO_KV_OFFLOAD": "n",
+    "USE_JINJA": "N",
+    "CHAT_TEMPLATE": "",
+    "TEMPLATE_MODE": "omit",
+    "KV_CACHE_TYPE": "",
+    "TEMPERATURE": 0.7,
+    "TOP_K": 40,
+    "TOP_P": 0.95,
+    "MIN_P": 0.05,
+    "REPEAT_PENALTY": 1.1
+  }
+}
+EOJSON
+        echo -e "${GREEN}Created templates file with example${NC}"
+        echo -e "${CYAN}File: $TEMPLATES_FILE${NC}"
     fi
+}
+
+# Load template safely without eval
+load_template_safely() {
+    local template_name="$1"
+
+    # Use python to extract values safely
+    python3 << EOPY
+import json
+import sys
+
+try:
+    with open('$TEMPLATES_FILE') as f:
+        data = json.load(f)
+
+    if '$template_name' not in data:
+        sys.exit(1)
+
+    config = data['$template_name']
+
+    # Write to shell script format, properly escaped
+    for key, value in config.items():
+        # Sanitize value
+        if isinstance(value, str):
+            value = value.replace("'", "'\\''")
+            print(f"{key}='{value}'")
+        else:
+            print(f"{key}={value}")
+except Exception as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
+EOPY
 }
 
 # List all templates
@@ -29,19 +92,28 @@ list_templates() {
         return
     fi
     
-    # Check if templates file has any templates
-    template_count=$(python3 -c "import json; data=json.load(open('$TEMPLATES_FILE')); print(len(data))" 2>/dev/null || echo "0")
-    
+    # Check if templates file has any user templates (exclude _example)
+    template_count=$(python3 -c "import json; data=json.load(open('$TEMPLATES_FILE')); print(len([k for k in data.keys() if not k.startswith('_')]))" 2>/dev/null || echo "0")
+
     if [ "$template_count" = "0" ]; then
-        echo -e "${YELLOW}No templates found.${NC}"
-        echo -e "${CYAN}Create templates by saving server configurations.${NC}"
+        echo -e "${YELLOW}No templates saved yet.${NC}\n"
+        echo -e "${CYAN}To create a template:${NC}"
+        echo "  1. Start a server (Main Menu -> 2 -> 1)"
+        echo "  2. Save configuration as template (Main Menu -> 3 -> 2)"
+        echo
+        echo -e "${CYAN}Or edit templates file directly:${NC}"
+        echo "  nano $TEMPLATES_FILE"
+        echo
+        echo -e "${YELLOW}An example template has been created for reference.${NC}"
     else
         echo -e "${CYAN}Available templates:${NC}\n"
         python3 -c "
 import json
 with open('$TEMPLATES_FILE') as f:
     data = json.load(f)
-    for i, (name, config) in enumerate(data.items(), 1):
+    # Filter out templates starting with underscore (examples/system)
+    user_templates = {k: v for k, v in data.items() if not k.startswith('_')}
+    for i, (name, config) in enumerate(user_templates.items(), 1):
         print(f'  ${CYAN}{i})${NC} {name}')
         print(f'      Model: {config.get(\"MODEL_ALIAS\", \"Unknown\")}')
         print(f'      GPU Layers: {config.get(\"GPU_LAYERS\", \"0\")}')
@@ -68,14 +140,14 @@ save_current_as_template() {
     fi
     
     # Check if config exists
-    if [ ! -f /tmp/llama-server-config.sh ]; then
+    if [ ! -f "$TEMP_CONFIG_FILE" ]; then
         echo -e "${RED}No server configuration found!${NC}"
         press_any_key
         return
     fi
     
     # Load current config
-    source /tmp/llama-server-config.sh
+    source "$TEMP_CONFIG_FILE"
     
     echo -e "${CYAN}Current server configuration:${NC}"
     echo -e "  Model: ${GREEN}$MODEL_ALIAS${NC}"
@@ -111,7 +183,7 @@ templates['$template_name'] = {
     'CONTEXT': ${CONTEXT:-4096},
     'BATCH': ${BATCH:-2048},
     'HOST': '${HOST:-0.0.0.0}',
-    'PORT': ${PORT:-8080},
+    'PORT': ${PORT:-8078},
     'PARALLEL': ${PARALLEL:-4},
     'GPU_LAYERS': ${GPU_LAYERS:-999},
     'SPLIT_MODE': '${SPLIT_MODE:-layer}',
@@ -145,16 +217,17 @@ start_from_template() {
     
     init_templates_file
     
-    # Check if templates exist
-    template_count=$(python3 -c "import json; data=json.load(open('$TEMPLATES_FILE')); print(len(data))" 2>/dev/null || echo "0")
-    
+    # Check if user templates exist (exclude _example)
+    template_count=$(python3 -c "import json; data=json.load(open('$TEMPLATES_FILE')); print(len([k for k in data.keys() if not k.startswith('_')]))" 2>/dev/null || echo "0")
+
     if [ "$template_count" = "0" ]; then
-        echo -e "${RED}No templates found!${NC}"
+        echo -e "${RED}No user templates found!${NC}"
         echo -e "${YELLOW}Create templates by saving server configurations.${NC}"
+        echo -e "${CYAN}Main Menu -> 3 -> 2${NC}"
         press_any_key
         return
     fi
-    
+
     # Check if already running
     if [ -f "$SERVICE_PID_FILE" ] && kill -0 $(cat "$SERVICE_PID_FILE") 2>/dev/null; then
         echo -e "${RED}Server is already running! (PID: $(cat $SERVICE_PID_FILE))${NC}"
@@ -162,8 +235,8 @@ start_from_template() {
         press_any_key
         return
     fi
-    
-    # List templates
+
+    # List templates (exclude _example)
     echo -e "${CYAN}Available templates:${NC}\n"
     templates=()
     while IFS= read -r template; do
@@ -172,8 +245,10 @@ start_from_template() {
 import json
 with open('$TEMPLATES_FILE') as f:
     data = json.load(f)
+    # Only show templates that don't start with underscore
     for name in data.keys():
-        print(name)
+        if not name.startswith('_'):
+            print(name)
 " 2>/dev/null)
     
     for i in "${!templates[@]}"; do
@@ -203,22 +278,21 @@ with open('$TEMPLATES_FILE') as f:
     fi
     
     selected_template="${templates[$((template_choice-1))]}"
-    
+
     echo -e "\n${CYAN}Loading template: ${BOLD}$selected_template${NC}"
-    
-    # Load template configuration
-    eval "$(python3 -c "
-import json
-with open('$TEMPLATES_FILE') as f:
-    data = json.load(f)
-    config = data['$selected_template']
-    for key, value in config.items():
-        if isinstance(value, str):
-            print(f\"{key}='{value}'\")
-        else:
-            print(f\"{key}={value}\")
-" 2>/dev/null)"
-    
+
+    # Load template configuration safely
+    temp_config=$(mktemp)
+    if load_template_safely "$selected_template" > "$temp_config"; then
+        source "$temp_config"
+        rm -f "$temp_config"
+    else
+        echo -e "${RED}Failed to load template${NC}"
+        rm -f "$temp_config"
+        press_any_key
+        return 1
+    fi
+
     # Check if model exists
     if [ ! -f "$MODEL" ]; then
         echo -e "\n${RED}Model file not found: $MODEL${NC}"
@@ -278,7 +352,7 @@ with open('$TEMPLATES_FILE') as f:
     echo $server_pid > "$SERVICE_PID_FILE"
     
     # Save config to temp for restart
-    cat > /tmp/llama-server-config.sh << EOFC
+    cat > "$TEMP_CONFIG_FILE" << EOFC
 MODEL="$MODEL"
 MODEL_ALIAS="$MODEL_ALIAS"
 THREADS=$THREADS
@@ -363,16 +437,17 @@ delete_template() {
     
     init_templates_file
     
-    # Check if templates exist
-    template_count=$(python3 -c "import json; data=json.load(open('$TEMPLATES_FILE')); print(len(data))" 2>/dev/null || echo "0")
-    
+    # Check if user templates exist (exclude _example)
+    template_count=$(python3 -c "import json; data=json.load(open('$TEMPLATES_FILE')); print(len([k for k in data.keys() if not k.startswith('_')]))" 2>/dev/null || echo "0")
+
     if [ "$template_count" = "0" ]; then
-        echo -e "${RED}No templates found!${NC}"
+        echo -e "${RED}No user templates found!${NC}"
+        echo -e "${YELLOW}System templates (like _example) cannot be deleted.${NC}"
         press_any_key
         return
     fi
-    
-    # List templates
+
+    # List templates (exclude _example)
     echo -e "${CYAN}Available templates:${NC}\n"
     templates=()
     while IFS= read -r template; do
@@ -381,8 +456,10 @@ delete_template() {
 import json
 with open('$TEMPLATES_FILE') as f:
     data = json.load(f)
+    # Only show templates that don't start with underscore
     for name in data.keys():
-        print(name)
+        if not name.startswith('_'):
+            print(name)
 " 2>/dev/null)
     
     for i in "${!templates[@]}"; do
@@ -405,12 +482,9 @@ with open('$TEMPLATES_FILE') as f:
     fi
     
     selected_template="${templates[$((template_choice-1))]}"
-    
-    echo -n -e "\n${RED}Are you sure you want to delete '$selected_template'? (y/N): ${NC}"
-    read -n 1 confirm
     echo
-    
-    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+
+    if prompt_yes_no "${RED}Are you sure you want to delete '$selected_template'?${NC}"; then
         python3 -c "
 import json
 with open('$TEMPLATES_FILE', 'r') as f:

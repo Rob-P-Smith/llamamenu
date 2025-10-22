@@ -3,6 +3,9 @@
 # Autostart Module
 # Handles auto-start configuration and systemd service management
 
+# Enable strict mode
+set -u  # Exit on undefined variables
+
 configure_autostart() {
     show_header
     echo -e "${YELLOW}${BOLD}Configure Auto-Start on Boot${NC}\n"
@@ -16,11 +19,8 @@ configure_autostart() {
     
     if is_autostart_enabled; then
         echo -e "${GREEN}Auto-start is currently ENABLED${NC}\n"
-        echo -n -e "Do you want to disable auto-start? (y/n): "
-        read -n 1 disable
-        echo
-        
-        if [ "$disable" = "y" ] || [ "$disable" = "Y" ]; then
+
+        if prompt_yes_no "Do you want to disable auto-start?"; then
             if sudo systemctl list-unit-files | grep -q "$SYSTEMD_SERVICE_NAME"; then
                 sudo systemctl disable "$SYSTEMD_SERVICE_NAME"
                 echo -e "${GREEN}Auto-start disabled${NC}"
@@ -34,13 +34,10 @@ configure_autostart() {
         fi
     else
         echo -e "${YELLOW}Auto-start is currently DISABLED${NC}\n"
-        echo -n -e "Do you want to enable auto-start on boot? (y/n): "
-        read -n 1 enable
-        echo
-        
-        if [ "$enable" = "y" ] || [ "$enable" = "Y" ]; then
+
+        if prompt_yes_no "Do you want to enable auto-start on boot?"; then
             echo -e "\n${CYAN}Creating systemd service...${NC}"
-            
+
             # Check if realpath is available, fall back to readlink
             if command -v realpath &> /dev/null; then
                 SCRIPT_PATH=$(realpath "$0")
@@ -49,10 +46,17 @@ configure_autostart() {
             else
                 SCRIPT_PATH="$0"
             fi
-            
-            sudo mkdir -p "$(dirname "$SYSTEMD_SERVICE_FILE")"
-            
-            sudo tee "$SYSTEMD_SERVICE_FILE" > /dev/null << EOSVC
+
+            # Try to create systemd service directory
+            if ! sudo mkdir -p "$(dirname "$SYSTEMD_SERVICE_FILE")" 2>/dev/null; then
+                echo -e "${RED}Error: Cannot create systemd service directory${NC}"
+                echo -e "${YELLOW}You may need sudo privileges or check system permissions${NC}"
+                press_any_key
+                return $E_PERMISSION
+            fi
+
+            # Try to write systemd service file
+            if ! sudo tee "$SYSTEMD_SERVICE_FILE" > /dev/null << EOSVC
 [Unit]
 Description=Llama.cpp Server
 After=network.target
@@ -69,10 +73,43 @@ User=$USER
 [Install]
 WantedBy=multi-user.target
 EOSVC
-            
-            sudo systemctl daemon-reload
-            sudo systemctl enable "$SYSTEMD_SERVICE_NAME"
-            
+            then
+                echo -e "${RED}Error: Failed to create systemd service file${NC}"
+                echo -e "${YELLOW}Check sudo privileges and /etc/systemd/system permissions${NC}"
+                press_any_key
+                return $E_PERMISSION
+            fi
+
+            # Set proper ownership and permissions
+            sudo chown root:root "$SYSTEMD_SERVICE_FILE" || {
+                echo -e "${YELLOW}Warning: Could not set service file ownership${NC}"
+            }
+
+            sudo chmod 644 "$SYSTEMD_SERVICE_FILE" || {
+                echo -e "${YELLOW}Warning: Could not set service file permissions${NC}"
+            }
+
+            # Validate service file syntax
+            if ! sudo systemd-analyze verify "$SYSTEMD_SERVICE_FILE" 2>/dev/null; then
+                echo -e "${YELLOW}Warning: Service file validation failed${NC}"
+                echo -e "${CYAN}Service may still work, but check syntax${NC}"
+            fi
+
+            # Try to reload systemd and enable service
+            if ! sudo systemctl daemon-reload 2>/dev/null; then
+                echo -e "${RED}Error: Failed to reload systemd${NC}"
+                echo -e "${YELLOW}Check systemctl permissions${NC}"
+                press_any_key
+                return $E_COMMAND_FAILED
+            fi
+
+            if ! sudo systemctl enable "$SYSTEMD_SERVICE_NAME" 2>/dev/null; then
+                echo -e "${RED}Error: Failed to enable service${NC}"
+                echo -e "${YELLOW}Check systemctl permissions${NC}"
+                press_any_key
+                return $E_COMMAND_FAILED
+            fi
+
             echo -e "${GREEN}Auto-start enabled!${NC}"
             echo -e "The server will start automatically on boot with the saved configuration."
             echo -e "\nYou can manage the service with:"

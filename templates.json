@@ -1,0 +1,25 @@
+{
+  "Detault-qwen3-30b-4_NL": {
+    "MODEL": "/home/robiloo/Documents/raid/Models/LM-Studio/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/Qwen3-30B-A3B-Instruct-2507-IQ4_NL.gguf",
+    "MODEL_ALIAS": "Qwen3 30B",
+    "THREADS": 32,
+    "CONTEXT": 400000,
+    "BATCH": 8192,
+    "HOST": "0.0.0.0",
+    "PORT": 8078,
+    "PARALLEL": 2,
+    "GPU_LAYERS": 999,
+    "SPLIT_MODE": "layer",
+    "MAIN_GPU": 0,
+    "NO_KV_OFFLOAD": "n",
+    "USE_JINJA": "y",
+    "CHAT_TEMPLATE": "chatml",
+    "TEMPLATE_MODE": "specified",
+    "KV_CACHE_TYPE": "",
+    "TEMPERATURE": 0.7,
+    "TOP_K": 20,
+    "TOP_P": 0.8,
+    "MIN_P": 0.0,
+    "REPEAT_PENALTY": 1.0
+  }
+}

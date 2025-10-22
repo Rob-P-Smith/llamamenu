@@ -3,6 +3,26 @@
 # Llama.cpp Management System - Main Entry Point
 # Modular version 2.2
 
+# Enable strict error handling for interactive script
+set -u  # Exit on undefined variables
+# Note: Not using -e as we want interactive menu to continue on errors
+# Not using pipefail as some commands are expected to fail gracefully
+
+# Error handler for interactive mode
+error_handler() {
+    local exit_code=$1
+    local line_number=$2
+    echo -e "\n${RED}Error on line $line_number (exit code: $exit_code)${NC}" >&2
+    echo -e "${YELLOW}Press any key to continue...${NC}"
+    read -n 1 -s -r
+    # Don't exit - return to menu
+    return 0
+}
+
+# Set up error trap (ERR only triggers with set -e, so we handle manually)
+set -E
+trap 'error_handler $? $LINENO' ERR
+
 # Get the directory where this script is located (resolving symlinks)
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
@@ -131,9 +151,23 @@ system_configuration() {
 
 # Main loop
 main() {
+    # Setup paths interactively if not configured
+    if ! setup_paths_interactive; then
+        echo -e "${RED}Failed to configure paths. Exiting.${NC}"
+        exit 1
+    fi
+
+    # Validate llama.cpp installation
+    if ! validate_llama_installation; then
+        echo -e "${RED}Llama.cpp installation validation failed.${NC}"
+        echo -e "${YELLOW}Please check your LLAMA_PATH: $LLAMA_PATH${NC}"
+        echo -e "${YELLOW}Required binaries: llama-server, llama-cli${NC}"
+        exit 1
+    fi
+
     # Show splash screen on startup
     show_splash
-    
+
     while true; do
         show_header
         show_menu
