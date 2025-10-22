@@ -2,6 +2,8 @@
 
 A comprehensive, modular management system for llama.cpp servers with GPU acceleration support, designed to simplify model deployment and server configuration. Features persistent configuration storage, auto-start capabilities, and safe monitoring tools that won't interrupt your workflow.
 
+## Consider this a beta, most features work, some are broken, and some options like prefix caching and slot assignment aren't yet implemented
+
 ## Installation
 
 ### Prerequisites
