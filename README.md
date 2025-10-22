@@ -6,7 +6,9 @@ A comprehensive, modular management system for llama.cpp servers with GPU accele
 
 **This project is under active development and not yet considered a final release.**
 
-While the system has been extensively tested and improved with a comprehensive test suite (18/18 tests passing), it should be considered **beta software**. Users should expect:
+-- Only tested in Ubuntu 24.04 on AMD rocm 7 custom build, but should work with any gpu as long as llama is built for your system --
+
+While the system has been extensively tested and improved with a simple test suite (18/18 tests passing) and manual testing, it should be considered **beta software**. Users should expect:
 
 - **Potential bugs** in edge cases and uncommon configurations
 - **Ongoing improvements** to features and functionality
