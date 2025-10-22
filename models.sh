@@ -19,8 +19,17 @@ view_models() {
 
     local count=0
     while IFS= read -r model; do
+        # Skip vocabulary files (they're not actual models)
+        if [[ "$(basename "$model")" == ggml-vocab-* ]]; then
+            continue
+        fi
+
         ((count++))
-        size=$(du -h "$model" | cut -f1)
+        size=$(du -h "$model" 2>/dev/null | cut -f1)
+        # If du fails, use ls as fallback
+        if [ -z "$size" ]; then
+            size=$(ls -lh "$model" 2>/dev/null | awk '{print $5}')
+        fi
         basename=$(basename "$model")
         friendly_name=$(get_friendly_name "$model")
         echo -e "${BLUE}$count)${NC} ${BOLD}$friendly_name${NC}"
@@ -156,6 +165,10 @@ test_model() {
     # List models
     models=()
     while IFS= read -r model; do
+        # Skip vocabulary files (they're not actual models)
+        if [[ "$(basename "$model")" == ggml-vocab-* ]]; then
+            continue
+        fi
         models+=("$model")
     done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
 
@@ -236,6 +249,10 @@ benchmark_model() {
 
     models=()
     while IFS= read -r model; do
+        # Skip vocabulary files (they're not actual models)
+        if [[ "$(basename "$model")" == ggml-vocab-* ]]; then
+            continue
+        fi
         models+=("$model")
     done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
 
@@ -357,6 +374,10 @@ rename_model() {
 
     models=()
     while IFS= read -r model; do
+        # Skip vocabulary files (they're not actual models)
+        if [[ "$(basename "$model")" == ggml-vocab-* ]]; then
+            continue
+        fi
         models+=("$model")
     done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
 

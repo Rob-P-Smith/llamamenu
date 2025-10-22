@@ -358,7 +358,7 @@ read_validated_integer() {
     local value
 
     while true; do
-        echo -n -e "$prompt (default: $default, range: $min-$max): "
+        echo -n -e "$prompt (default: $default, range: $min-$max): " >&2
         read value
         value=${value:-$default}
 
@@ -367,7 +367,7 @@ read_validated_integer() {
             return 0
         fi
 
-        echo -e "${RED}Invalid input. Please enter a number between $min and $max${NC}"
+        echo -e "${RED}Invalid input. Please enter a number between $min and $max${NC}" >&2
     done
 }
 
@@ -380,7 +380,7 @@ read_validated_float() {
     local value
 
     while true; do
-        echo -n -e "$prompt (default: $default, range: $min-$max): "
+        echo -n -e "$prompt (default: $default, range: $min-$max): " >&2
         read value
         value=${value:-$default}
 
@@ -393,7 +393,7 @@ read_validated_float() {
             fi
         fi
 
-        echo -e "${RED}Invalid input. Please enter a number between $min and $max${NC}"
+        echo -e "${RED}Invalid input. Please enter a number between $min and $max${NC}" >&2
     done
 }
 

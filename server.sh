@@ -31,6 +31,10 @@ start_server() {
 
     models=()
     while IFS= read -r model; do
+        # Skip vocabulary files (they're not actual models)
+        if [[ "$(basename "$model")" == ggml-vocab-* ]]; then
+            continue
+        fi
         models+=("$model")
     done < <(find "$MODELS_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
 
